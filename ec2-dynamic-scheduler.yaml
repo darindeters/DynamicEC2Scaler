@@ -135,6 +135,8 @@ Resources:
           DEFAULT_PRICING_OPERATING_SYSTEM: !Ref DefaultPricingOperatingSystem
           DEFAULT_PRICING_LICENSE_MODEL: !Ref DefaultPricingLicenseModel
           DEFAULT_PRICING_PREINSTALLED_SOFTWARE: !Ref DefaultPricingPreInstalledSoftware
+          SCALE_UP_CRON_EXPRESSION: !Ref LambdaScheduleUpTime
+          SCALE_DOWN_CRON_EXPRESSION: !Ref LambdaScheduleDownTime
       Code:
         ZipFile: |
           import boto3
@@ -155,6 +157,11 @@ Resources:
 
           DEFAULT_DOWNSIZE_TYPE = "t3.medium"
           VALID_ACTIONS = {"scaleup", "scaledown"}
+          RUN_CONTEXT = {}
+          LAST_SCALE_DOWN_TIMESTAMP_TAG = "DynamicScalingLastScaleDownTimestamp"
+          LAST_SCALE_DOWN_HOURLY_TAG = "DynamicScalingLastScaleDownHourlySavings"
+          LAST_SCALE_UP_TIMESTAMP_TAG = "DynamicScalingLastScaleUpTimestamp"
+          SCALE_UP_CRON_ENV = "SCALE_UP_CRON_EXPRESSION"
 
           REGION_NAME_MAP = {
               "af-south-1": "Africa (Cape Town)",
@@ -188,6 +195,165 @@ Resources:
               "us-west-1": "US West (N. California)",
               "us-west-2": "US West (Oregon)",
           }
+
+          CRON_WEEKDAY_MAP = {
+              "MON": 0,
+              "TUE": 1,
+              "WED": 2,
+              "THU": 3,
+              "FRI": 4,
+              "SAT": 5,
+              "SUN": 6,
+          }
+
+          def format_utc(dt):
+              if not isinstance(dt, datetime.datetime):
+                  raise TypeError("Expected datetime instance when formatting timestamp")
+              if dt.tzinfo is not None:
+                  dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+              return dt.replace(microsecond=0).isoformat() + "Z"
+
+          def set_run_start_time(dt):
+              RUN_CONTEXT["start_time"] = dt
+
+          def get_run_start_time():
+              return RUN_CONTEXT.get("start_time")
+
+          def parse_timestamp(value):
+              if not value:
+                  return None
+              cleaned = value.strip()
+              if not cleaned:
+                  return None
+              if cleaned.endswith("Z"):
+                  cleaned = cleaned[:-1] + "+00:00"
+              try:
+                  parsed = datetime.datetime.fromisoformat(cleaned)
+              except ValueError:
+                  return None
+              if parsed.tzinfo is not None:
+                  parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+              return parsed
+
+          def cron_value_to_weekday(token):
+              upper_token = token.strip().upper()
+              if not upper_token:
+                  raise ValueError("Empty day-of-week token in cron expression")
+              if upper_token in CRON_WEEKDAY_MAP:
+                  return CRON_WEEKDAY_MAP[upper_token]
+              try:
+                  numeric = int(token)
+              except ValueError as exc:
+                  raise ValueError(f"Unsupported day-of-week token: {token}") from exc
+              if numeric in (0, 7):
+                  return 6
+              if 1 <= numeric <= 6:
+                  return numeric - 1
+              raise ValueError(f"Day-of-week value out of range: {token}")
+
+          def parse_day_of_week_field(field):
+              normalized = (field or "*").strip().upper()
+              if normalized in {"*", "?"}:
+                  return None
+              allowed = set()
+              for segment in normalized.split(","):
+                  segment = segment.strip()
+                  if not segment:
+                      continue
+                  if "-" in segment:
+                      start_token, end_token = segment.split("-", 1)
+                      start = cron_value_to_weekday(start_token)
+                      end = cron_value_to_weekday(end_token)
+                      if start <= end:
+                          for value in range(start, end + 1):
+                              allowed.add(value)
+                      else:
+                          for value in list(range(start, 7)) + list(range(0, end + 1)):
+                              allowed.add(value)
+                  else:
+                      allowed.add(cron_value_to_weekday(segment))
+              return allowed
+
+          def parse_single_int_field(value, field_name, minimum, maximum):
+              cleaned = (value or "").strip()
+              if cleaned in {"*", "?"}:
+                  raise ValueError(
+                      f"{field_name} field must be a fixed numeric value in cron expression"
+                  )
+              try:
+                  numeric = int(cleaned)
+              except ValueError as exc:
+                  raise ValueError(
+                      f"{field_name} field must be an integer in cron expression"
+                  ) from exc
+              if numeric < minimum or numeric > maximum:
+                  raise ValueError(
+                      f"{field_name} field value {numeric} is out of the allowed range {minimum}-{maximum}"
+                  )
+              return numeric
+
+          def parse_cron_expression(cron_expression):
+              if not cron_expression:
+                  raise ValueError("Cron expression is empty")
+              expression = cron_expression.strip()
+              if expression.lower().startswith("cron(") and expression.endswith(")"):
+                  expression = expression[5:-1].strip()
+              parts = expression.split()
+              if len(parts) != 6:
+                  raise ValueError(f"Cron expression must have 6 fields: {cron_expression}")
+              (
+                  minute_field,
+                  hour_field,
+                  day_of_month_field,
+                  month_field,
+                  day_of_week_field,
+                  year_field,
+              ) = parts
+              minute = parse_single_int_field(minute_field, "minute", 0, 59)
+              hour = parse_single_int_field(hour_field, "hour", 0, 23)
+              if day_of_month_field not in {"*", "?"}:
+                  raise ValueError(
+                      "Day-of-month field must be '*' or '?' for supported cron expressions"
+                  )
+              if month_field not in {"*"}:
+                  raise ValueError("Month field must be '*' for supported cron expressions")
+              if year_field not in {"*"}:
+                  raise ValueError("Year field must be '*' for supported cron expressions")
+              allowed_days = parse_day_of_week_field(day_of_week_field)
+              return minute, hour, allowed_days
+
+          def get_next_scheduled_time(cron_expression, reference_time):
+              minute, hour, allowed_days = parse_cron_expression(cron_expression)
+              baseline = reference_time.replace(second=0, microsecond=0)
+              for day_offset in range(0, 14):
+                  candidate_date = baseline.date() + datetime.timedelta(days=day_offset)
+                  candidate = datetime.datetime.combine(
+                      candidate_date,
+                      datetime.time(hour=hour, minute=minute),
+                  )
+                  if candidate <= reference_time:
+                      continue
+                  if allowed_days is not None and candidate.weekday() not in allowed_days:
+                      continue
+                  return candidate
+              raise ValueError(
+                  "Unable to find the next scheduled time within 14 days for cron expression: "
+                  f"{cron_expression}"
+              )
+
+          def compute_projected_savings(total_hourly_savings, reference_time):
+              schedule_expression = os.environ.get(SCALE_UP_CRON_ENV)
+              if not schedule_expression:
+                  raise ValueError("Scale up cron expression environment variable is not set")
+              next_scale_up = get_next_scheduled_time(schedule_expression, reference_time)
+              duration_hours = max((next_scale_up - reference_time).total_seconds() / 3600.0, 0.0)
+              projected_total = round(total_hourly_savings * duration_hours, 4)
+              return {
+                  "projection_source": "scale_up_schedule",
+                  "projected_scale_up_time_utc": format_utc(next_scale_up),
+                  "projected_off_hours_duration_hours": round(duration_hours, 4),
+                  "projected_total_savings": projected_total,
+              }
 
           DEFAULT_PRICING_FILTERS = {
               "operatingSystem": os.environ.get("DEFAULT_PRICING_OPERATING_SYSTEM", "Linux"),
@@ -578,6 +744,34 @@ Resources:
                   }
               ]
 
+              projected_total = report.get("projected_total_savings")
+              if projected_total is not None:
+                  metric_data.append(
+                      {
+                          "MetricName": "TotalProjectedOffHoursSavings",
+                          "Dimensions": [
+                              {"Name": "Region", "Value": report["region"]},
+                          ],
+                          "Timestamp": timestamp,
+                          "Value": projected_total,
+                          "Unit": "None",
+                      }
+                  )
+
+              projected_duration = report.get("projected_off_hours_duration_hours")
+              if projected_duration is not None:
+                  metric_data.append(
+                      {
+                          "MetricName": "ProjectedOffHoursDurationHours",
+                          "Dimensions": [
+                              {"Name": "Region", "Value": report["region"]},
+                          ],
+                          "Timestamp": timestamp,
+                          "Value": projected_duration,
+                          "Unit": "None",
+                      }
+                  )
+
               for instance in report["instances"]:
                   metric_data.append(
                       {
@@ -596,9 +790,151 @@ Resources:
                   batch = metric_data[i : i + 20]
                   cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
 
+          def build_actual_savings_snapshot(instance_id, tags, desired_type, current_type):
+              last_down_value = tags.get(LAST_SCALE_DOWN_TIMESTAMP_TAG)
+              hourly_value = tags.get(LAST_SCALE_DOWN_HOURLY_TAG)
+
+              if not last_down_value or not hourly_value:
+                  print(
+                      "Missing scale-down metadata for "
+                      f"{instance_id}. Skipping actual savings calculation."
+                  )
+                  return None
+
+              scale_down_time = parse_timestamp(last_down_value)
+              if not scale_down_time:
+                  print(
+                      "Unable to parse scale-down timestamp for "
+                      f"{instance_id}: {last_down_value}"
+                  )
+                  return None
+
+              last_scale_up_value = tags.get(LAST_SCALE_UP_TIMESTAMP_TAG)
+              last_scale_up_time = parse_timestamp(last_scale_up_value)
+              if last_scale_up_time and last_scale_up_time >= scale_down_time:
+                  print(
+                      "Actual savings already recorded after the last scale-down "
+                      f"window for {instance_id}. Skipping."
+                  )
+                  return None
+
+              try:
+                  hourly_savings = float(hourly_value)
+              except ValueError:
+                  print(
+                      "Invalid hourly savings tag for "
+                      f"{instance_id}: {hourly_value}"
+                  )
+                  return None
+
+              scale_up_time = datetime.datetime.utcnow().replace(microsecond=0)
+              downtime_hours = max(
+                  (scale_up_time - scale_down_time).total_seconds() / 3600.0,
+                  0.0,
+              )
+              actual_savings_value = round(hourly_savings * downtime_hours, 4)
+
+              print(
+                  f"Measured downtime for {instance_id}: {downtime_hours:.4f} hours, "
+                  f"actual savings ${actual_savings_value:.4f}"
+              )
+
+              record = {
+                  "instance_id": instance_id,
+                  "off_hours_type": current_type,
+                  "restored_type": desired_type,
+                  "scale_down_timestamp": format_utc(scale_down_time),
+                  "scale_up_timestamp": format_utc(scale_up_time),
+                  "downtime_hours": round(downtime_hours, 4),
+                  "hourly_savings": round(hourly_savings, 4),
+                  "actual_savings": actual_savings_value,
+                  "actual_savings_source": f"tag:{LAST_SCALE_DOWN_HOURLY_TAG}",
+              }
+
+              return record, scale_up_time
+
+          def publish_actual_savings_metrics(report, timestamp):
+              namespace = get_metric_namespace()
+              if not namespace:
+                  print("Savings metric namespace not configured. Skipping CloudWatch metrics.")
+                  return
+
+              metric_data = [
+                  {
+                      "MetricName": "TotalActualSavings",
+                      "Dimensions": [
+                          {"Name": "Region", "Value": report["region"]},
+                      ],
+                      "Timestamp": timestamp,
+                      "Value": report["total_actual_savings"],
+                      "Unit": "None",
+                  },
+                  {
+                      "MetricName": "TotalActualDowntimeHours",
+                      "Dimensions": [
+                          {"Name": "Region", "Value": report["region"]},
+                      ],
+                      "Timestamp": timestamp,
+                      "Value": report["total_actual_downtime_hours"],
+                      "Unit": "None",
+                  },
+              ]
+
+              hourly_basis = report.get("total_hourly_savings_basis")
+              if hourly_basis is not None:
+                  metric_data.append(
+                      {
+                          "MetricName": "TotalActualHourlySavingsBasis",
+                          "Dimensions": [
+                              {"Name": "Region", "Value": report["region"]},
+                          ],
+                          "Timestamp": timestamp,
+                          "Value": hourly_basis,
+                          "Unit": "None",
+                      }
+                  )
+
+              for instance in report.get("instances", []):
+                  instance_id = instance.get("instance_id")
+                  if not instance_id:
+                      continue
+                  actual_savings = instance.get("actual_savings")
+                  if actual_savings is not None:
+                      metric_data.append(
+                          {
+                              "MetricName": "InstanceActualSavings",
+                              "Dimensions": [
+                                  {"Name": "Region", "Value": report["region"]},
+                                  {"Name": "InstanceId", "Value": instance_id},
+                              ],
+                              "Timestamp": timestamp,
+                              "Value": actual_savings,
+                              "Unit": "None",
+                          }
+                      )
+                  downtime_value = instance.get("downtime_hours")
+                  if downtime_value is not None:
+                      metric_data.append(
+                          {
+                              "MetricName": "InstanceDowntimeHours",
+                              "Dimensions": [
+                                  {"Name": "Region", "Value": report["region"]},
+                                  {"Name": "InstanceId", "Value": instance_id},
+                              ],
+                              "Timestamp": timestamp,
+                              "Value": downtime_value,
+                              "Unit": "None",
+                          }
+                      )
+
+              for i in range(0, len(metric_data), 20):
+                  batch = metric_data[i : i + 20]
+                  cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+
           def record_savings(savings_records):
-              now = datetime.datetime.utcnow()
-              timestamp = now.replace(microsecond=0).isoformat() + "Z"
+              run_time = get_run_start_time() or datetime.datetime.utcnow()
+              run_time = run_time.replace(microsecond=0)
+              timestamp = format_utc(run_time)
               region = get_region()
               savings_plan_factor = get_savings_plan_factor()
               total_hourly_savings = round(
@@ -616,6 +952,20 @@ Resources:
                   "instances": savings_records,
               }
 
+              try:
+                  projection_details = compute_projected_savings(
+                      total_hourly_savings,
+                      run_time,
+                  )
+              except Exception as projection_error:
+                  print(
+                      "Unable to derive projected savings window: "
+                      f"{projection_error}"
+                  )
+                  summary["projection_error"] = str(projection_error)
+              else:
+                  summary.update(projection_details)
+
               if not savings_records:
                   summary["zero_savings"] = True
                   summary["zero_savings_reason"] = "no_savings_records_generated"
@@ -628,7 +978,7 @@ Resources:
               }
               print(json.dumps(log_event))
 
-              key = f"savings/{now.date()}/{timestamp}.json"
+              key = f"savings/{run_time.date()}/{timestamp}.json"
               bucket = os.environ.get("SAVINGS_BUCKET")
               if not bucket:
                   raise ValueError("SAVINGS_BUCKET environment variable is not set")
@@ -640,7 +990,62 @@ Resources:
               )
 
               if savings_records:
-                  publish_savings_metrics(summary, now)
+                  publish_savings_metrics(summary, run_time)
+
+          def record_actual_savings(actual_records):
+              run_time = get_run_start_time() or datetime.datetime.utcnow()
+              run_time = run_time.replace(microsecond=0)
+              timestamp = format_utc(run_time)
+              region = get_region()
+
+              total_actual_savings = round(
+                  sum(record.get("actual_savings", 0.0) for record in actual_records),
+                  4,
+              ) if actual_records else 0.0
+              total_downtime_hours = round(
+                  sum(record.get("downtime_hours", 0.0) for record in actual_records),
+                  4,
+              ) if actual_records else 0.0
+              total_hourly_basis = round(
+                  sum(record.get("hourly_savings", 0.0) for record in actual_records),
+                  4,
+              ) if actual_records else 0.0
+
+              summary = {
+                  "timestamp": timestamp,
+                  "region": region,
+                  "calculation_source": "instance_tag_metadata",
+                  "total_actual_savings": total_actual_savings,
+                  "total_actual_downtime_hours": total_downtime_hours,
+                  "total_hourly_savings_basis": total_hourly_basis,
+                  "instances": actual_records,
+              }
+
+              if not actual_records:
+                  summary["zero_savings"] = True
+                  summary["zero_savings_reason"] = "no_actual_savings_records"
+                  summary["zero_savings_flags"] = ["no_actual_records"]
+
+              log_event = {
+                  "level": "INFO",
+                  "event": "ActualSavingsSummary",
+                  "summary": summary,
+              }
+              print(json.dumps(log_event))
+
+              key = f"actual-savings/{run_time.date()}/{timestamp}.json"
+              bucket = os.environ.get("SAVINGS_BUCKET")
+              if not bucket:
+                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
+              print(f"Writing actual savings report to s3://{bucket}/{key}")
+              s3.put_object(
+                  Bucket=bucket,
+                  Key=key,
+                  Body=json.dumps(summary, indent=2).encode("utf-8"),
+              )
+
+              if actual_records:
+                  publish_actual_savings_metrics(summary, run_time)
 
           def lambda_handler(event, context):
               action = event.get("action")
@@ -651,6 +1056,10 @@ Resources:
 
               if source == "manual":
                   raise Exception("Manual execution is blocked. Use EventBridge scheduled rules.")
+
+              run_start_time = datetime.datetime.utcnow().replace(microsecond=0)
+              set_run_start_time(run_start_time)
+              run_start_timestamp = format_utc(run_start_time)
 
               print(f"Starting EC2 {action} process...")
 
@@ -669,6 +1078,7 @@ Resources:
                   return {"processed_instances": 0, "action": action}
 
               savings_records = []
+              actual_savings_records = []
 
               for reservation in reservations:
                   for instance in reservation["Instances"]:
@@ -678,6 +1088,9 @@ Resources:
                       tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
 
                       print(f"\nProcessing {instance_id} ({state}, {current_type})")
+
+                      actual_snapshot = None
+                      actual_snapshot_time = None
 
                       if action == "scaledown":
                           downsize_type = get_downsize_type()
@@ -710,17 +1123,35 @@ Resources:
                               downsized_rate = get_hourly_rate(desired_type, pricing_filters)
                               hourly_savings = max(original_rate - downsized_rate, 0)
                               hourly_savings *= get_savings_plan_factor()
-                              savings_records.append(
-                                  {
-                                      "instance_id": instance_id,
-                                      "previous_type": current_type,
-                                      "downsized_type": desired_type,
-                                      "pricing_operating_system": pricing_filters["operatingSystem"],
-                                      "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
-                                      "pricing_license_model": pricing_filters["licenseModel"],
-                                      "pricing_profile_source": pricing_source,
-                                      "hourly_savings": round(hourly_savings, 4),
-                                  }
+                              record = {
+                                  "instance_id": instance_id,
+                                  "previous_type": current_type,
+                                  "downsized_type": desired_type,
+                                  "pricing_operating_system": pricing_filters["operatingSystem"],
+                                  "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
+                                  "pricing_license_model": pricing_filters["licenseModel"],
+                                  "pricing_profile_source": pricing_source,
+                                  "hourly_savings": round(hourly_savings, 4),
+                                  "scale_down_timestamp": run_start_timestamp,
+                              }
+                              savings_records.append(record)
+                              ec2.create_tags(
+                                  Resources=[instance_id],
+                                  Tags=[
+                                      {
+                                          "Key": LAST_SCALE_DOWN_TIMESTAMP_TAG,
+                                          "Value": run_start_timestamp,
+                                      },
+                                      {
+                                          "Key": LAST_SCALE_DOWN_HOURLY_TAG,
+                                          "Value": f"{hourly_savings:.4f}",
+                                      },
+                                  ],
+                              )
+                              print(
+                                  "Recorded scale-down metadata for "
+                                  f"{instance_id}: timestamp={run_start_timestamp}, "
+                                  f"hourly_savings=${hourly_savings:.4f}"
                               )
                               print(
                                   f"Estimated hourly savings for {instance_id}: ${hourly_savings:.4f}"
@@ -739,6 +1170,16 @@ Resources:
                           if current_type == desired_type:
                               print("Already at desired type. Skipping.")
                               continue
+
+                          actual_result = build_actual_savings_snapshot(
+                              instance_id=instance_id,
+                              tags=tags,
+                              desired_type=desired_type,
+                              current_type=current_type,
+                          )
+                          if actual_result:
+                              actual_snapshot, actual_snapshot_time = actual_result
+                              actual_savings_records.append(actual_snapshot)
 
                       if state != "stopped":
                           print(f"Stopping {instance_id}...")
@@ -778,10 +1219,28 @@ Resources:
                       else:
                           raise Exception(f"{instance_id} did not reach 'running' state after 90 seconds.")
 
+                      if action == "scaleup" and actual_snapshot_time is not None:
+                          scale_up_timestamp_value = format_utc(actual_snapshot_time)
+                          ec2.create_tags(
+                              Resources=[instance_id],
+                              Tags=[
+                                  {
+                                      "Key": LAST_SCALE_UP_TIMESTAMP_TAG,
+                                      "Value": scale_up_timestamp_value,
+                                  }
+                              ],
+                          )
+                          print(
+                              f"Recorded scale-up metadata for {instance_id}: "
+                              f"timestamp={scale_up_timestamp_value}"
+                          )
+
               print("Lambda execution completed.")
 
               if action == "scaledown":
                   record_savings(savings_records)
+              else:
+                  record_actual_savings(actual_savings_records)
 
   EC2ScalerScheduleDown:
     Type: AWS::Events::Rule
