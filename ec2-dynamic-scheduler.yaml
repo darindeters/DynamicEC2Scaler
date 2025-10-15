@@ -7,10 +7,54 @@ Parameters:
     Default: DynamicEC2Scheduler
   LambdaScheduleUpTime:
     Type: String
-    Default: "cron(0 11 ? * MON-FRI *)"
+    Default: "cron(0 4 ? * MON-FRI *)"
   LambdaScheduleDownTime:
     Type: String
-    Default: "cron(0 2 ? * MON-FRI *)"
+    Default: "cron(0 19 ? * MON-FRI *)"
+  OffHoursInstanceType:
+    Type: String
+    Default: t3.medium
+    Description: Instance type to apply during scale-down operations when downsizing instances.
+  SavingsMetricNamespace:
+    Type: String
+    Default: "DynamicEC2Scaler/Savings"
+    Description: CloudWatch metric namespace to use when publishing savings data.
+  SavingsPlanDiscountPercent:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+    Description: Percentage discount applied to On-Demand rates by an account-wide Compute Savings Plan (0-100).
+  SavingsPlanDiscountMode:
+    Type: String
+    Default: Manual
+    AllowedValues:
+      - Manual
+      - Coverage
+    Description: Controls how Savings Plan discounts are applied (Manual uses the provided percentage, Coverage derives an effective rate from Cost Explorer).
+  SavingsPlanCoverageLookbackDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 90
+    Description: Lookback window (in days) to use when deriving Savings Plan coverage data from Cost Explorer.
+  DefaultPricingOperatingSystem:
+    Type: String
+    Default: Linux
+    AllowedValues:
+      - Linux
+      - Windows
+      - RHEL
+      - SUSE
+    Description: Default operating system filter to use for pricing lookups when an instance platform cannot be detected.
+  DefaultPricingLicenseModel:
+    Type: String
+    Default: "No License required"
+    Description: Default license model filter to use for pricing lookups when an instance platform cannot be detected.
+  DefaultPricingPreInstalledSoftware:
+    Type: String
+    Default: NA
+    Description: Default pre-installed software filter to use for pricing lookups when an instance platform cannot be detected.
 
 Resources:
 
@@ -55,6 +99,18 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/DynamicInstanceScaling: "true"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${SavingsLogBucket}/*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ce:GetSavingsPlansCoverage
+                Resource: "*"
 
   EC2ScalerFunction:
     Type: AWS::Lambda::Function
@@ -67,14 +123,398 @@ Resources:
       MemorySize: 512
       ReservedConcurrentExecutions: 10
       Timeout: 300
+      Environment:
+        Variables:
+          SAVINGS_BUCKET: !Ref SavingsLogBucket
+          SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
+          SAVINGS_PLAN_DISCOUNT_MODE: !Ref SavingsPlanDiscountMode
+          SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS: !Ref SavingsPlanCoverageLookbackDays
+          SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
+          OFF_HOURS_INSTANCE_TYPE: !Ref OffHoursInstanceType
+          DEFAULT_PRICING_OPERATING_SYSTEM: !Ref DefaultPricingOperatingSystem
+          DEFAULT_PRICING_LICENSE_MODEL: !Ref DefaultPricingLicenseModel
+          DEFAULT_PRICING_PREINSTALLED_SOFTWARE: !Ref DefaultPricingPreInstalledSoftware
       Code:
         ZipFile: |
           import boto3
+          import datetime
+          import json
+          import os
           import time
           ec2 = boto3.client('ec2')
+          pricing = boto3.client('pricing', region_name='us-east-1')
+          s3 = boto3.client('s3')
+          cloudwatch = boto3.client('cloudwatch')
+          cost_explorer = boto3.client('ce', region_name='us-east-1')
+          session = boto3.session.Session()
+          PRICE_CACHE = {}
+          SAVINGS_PLAN_FACTOR = None
+          SAVINGS_PLAN_FACTOR_SOURCE = None
+          DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 
-          DOWNSIZE_TYPE = "t3.medium"
+          DEFAULT_DOWNSIZE_TYPE = "t3.medium"
           VALID_ACTIONS = {"scaleup", "scaledown"}
+
+          REGION_NAME_MAP = {
+              "us-east-2": "US East (Ohio)",
+              "us-west-2": "US West (Oregon)",
+          }
+
+          DEFAULT_PRICING_FILTERS = {
+              "operatingSystem": os.environ.get("DEFAULT_PRICING_OPERATING_SYSTEM", "Linux"),
+              "preInstalledSw": os.environ.get("DEFAULT_PRICING_PREINSTALLED_SOFTWARE", "NA"),
+              "licenseModel": os.environ.get("DEFAULT_PRICING_LICENSE_MODEL", "No License required"),
+          }
+
+          PLATFORM_FILTER_RULES = [
+              (
+                  "windows with sql server enterprise",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Ent",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows with sql server standard",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Std",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows with sql server web",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Web",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "bring your own license",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "Bring your own license",
+                  },
+              ),
+              (
+                  "byol",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "Bring your own license",
+                  },
+              ),
+              (
+                  "red hat enterprise linux",
+                  {
+                      "operatingSystem": "RHEL",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "rhel",
+                  {
+                      "operatingSystem": "RHEL",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "suse",
+                  {
+                      "operatingSystem": "SUSE",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "linux",
+                  {
+                      "operatingSystem": "Linux",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+          ]
+
+          def get_region():
+              region_name = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+              if not region_name:
+                  raise ValueError("AWS region could not be determined for pricing lookup")
+              return region_name
+
+          def get_location(region_name):
+              location = REGION_NAME_MAP.get(region_name)
+              if not location:
+                  raise ValueError(f"Unsupported region for pricing lookup: {region_name}")
+              return location
+
+          def build_pricing_cache_key(instance_type, pricing_filters):
+              return (
+                  instance_type,
+                  pricing_filters.get("operatingSystem"),
+                  pricing_filters.get("preInstalledSw"),
+                  pricing_filters.get("licenseModel"),
+              )
+
+          def get_instance_pricing_profile(instance):
+              platform_candidates = [
+                  instance.get("PlatformDetails"),
+                  instance.get("Platform"),
+                  instance.get("UsageOperation"),
+              ]
+
+              for platform_text in platform_candidates:
+                  normalized = (platform_text or "").strip().lower()
+                  if not normalized:
+                      continue
+                  for match, filters in PLATFORM_FILTER_RULES:
+                      if match in normalized:
+                          return dict(filters), f"platform:{platform_text}"
+
+              return dict(DEFAULT_PRICING_FILTERS), "default"
+
+          def get_hourly_rate(instance_type, pricing_filters):
+              cache_key = build_pricing_cache_key(instance_type, pricing_filters)
+              if cache_key in PRICE_CACHE:
+                  return PRICE_CACHE[cache_key]
+
+              region_name = get_region()
+              location = get_location(region_name)
+              filters = [
+                  {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
+                  {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "operatingSystem",
+                      "Value": pricing_filters["operatingSystem"],
+                  },
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "preInstalledSw",
+                      "Value": pricing_filters["preInstalledSw"],
+                  },
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "licenseModel",
+                      "Value": pricing_filters["licenseModel"],
+                  },
+                  {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
+                  {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
+              ]
+
+              response = pricing.get_products(
+                  ServiceCode="AmazonEC2",
+                  Filters=filters,
+                  MaxResults=1,
+              )
+
+              price_list = response.get("PriceList")
+              if not price_list:
+                  raise ValueError(
+                      "No pricing information found for "
+                      f"{instance_type} ({pricing_filters}) in {region_name}"
+                  )
+
+              price_item = json.loads(price_list[0])
+              on_demand_terms = price_item["terms"].get("OnDemand", {})
+              for term in on_demand_terms.values():
+                  price_dimensions = term.get("priceDimensions", {})
+                  for dimension in price_dimensions.values():
+                      price = float(dimension["pricePerUnit"].get("USD", "0"))
+                      PRICE_CACHE[cache_key] = price
+                      return price
+
+              raise ValueError(
+                  f"Unable to parse pricing information for {instance_type} ({pricing_filters})"
+              )
+
+          def parse_float(value, default=0.0):
+              try:
+                  return float(value)
+              except (TypeError, ValueError):
+                  return default
+
+          def get_manual_discount_factor():
+              raw_value = os.environ.get("SAVINGS_PLAN_DISCOUNT_PERCENT", "0")
+              try:
+                  discount_percent = float(raw_value)
+              except ValueError as exc:
+                  raise ValueError(
+                      "SAVINGS_PLAN_DISCOUNT_PERCENT must be a number between 0 and 100"
+                  ) from exc
+
+              if discount_percent < 0 or discount_percent > 100:
+                  raise ValueError(
+                      "SAVINGS_PLAN_DISCOUNT_PERCENT must be between 0 and 100"
+                  )
+
+              return 1 - (discount_percent / 100.0)
+
+          def get_coverage_discount_factor():
+              raw_lookback = os.environ.get("SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS", "30")
+              try:
+                  lookback_days = int(raw_lookback)
+              except ValueError as exc:
+                  raise ValueError(
+                      "SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS must be an integer between 1 and 90"
+                  ) from exc
+
+              if lookback_days < 1 or lookback_days > 90:
+                  raise ValueError(
+                      "SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS must be between 1 and 90"
+                  )
+
+              end_date = datetime.date.today()
+              start_date = end_date - datetime.timedelta(days=lookback_days)
+
+              total_savings = 0.0
+              total_cost = 0.0
+              next_token = None
+
+              while True:
+                  kwargs = {
+                      "TimePeriod": {
+                          "Start": start_date.isoformat(),
+                          "End": end_date.isoformat(),
+                      },
+                      "Granularity": "DAILY",
+                  }
+                  if next_token:
+                      kwargs["NextToken"] = next_token
+
+                  response = cost_explorer.get_savings_plans_coverage(**kwargs)
+                  for coverage in response.get("SavingsPlansCoverages", []):
+                      data = coverage.get("Coverage", {})
+                      total_savings += parse_float(data.get("SavingsPlansSavings"))
+                      total_cost += parse_float(data.get("TotalCost"))
+
+                  next_token = response.get("NextToken")
+                  if not next_token:
+                      break
+
+              denominator = total_cost + total_savings
+              if denominator <= 0:
+                  raise ValueError("Savings Plan coverage data is empty for the selected window")
+
+              discount_percent = max(min(total_savings / denominator, 0.9999), 0.0) * 100
+              print(
+                  "Derived Savings Plan discount percent from Cost Explorer coverage: "
+                  f"{discount_percent:.4f}% over the last {lookback_days} days"
+              )
+              return 1 - (discount_percent / 100.0)
+
+          def get_savings_plan_factor():
+              global SAVINGS_PLAN_FACTOR
+              global SAVINGS_PLAN_FACTOR_SOURCE
+              if SAVINGS_PLAN_FACTOR is not None:
+                  return SAVINGS_PLAN_FACTOR
+
+              mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
+
+              if mode == "coverage":
+                  try:
+                      SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
+                      SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
+                      return SAVINGS_PLAN_FACTOR
+                  except Exception as coverage_error:
+                      print(
+                          "Falling back to manual Savings Plan discount due to coverage error: "
+                          f"{coverage_error}"
+                      )
+
+              SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
+              SAVINGS_PLAN_FACTOR_SOURCE = "manual"
+              return SAVINGS_PLAN_FACTOR
+
+          def get_metric_namespace():
+              raw_value = os.environ.get("SAVINGS_METRIC_NAMESPACE")
+              if raw_value is None:
+                  return DEFAULT_METRIC_NAMESPACE
+              namespace = raw_value.strip()
+              return namespace
+
+          def get_downsize_type():
+              raw_value = os.environ.get("OFF_HOURS_INSTANCE_TYPE")
+              if raw_value:
+                  downsized = raw_value.strip()
+                  if downsized:
+                      return downsized
+              return DEFAULT_DOWNSIZE_TYPE
+
+          def publish_savings_metrics(report, timestamp):
+              namespace = get_metric_namespace()
+              if not namespace:
+                  print("Savings metric namespace not configured. Skipping CloudWatch metrics.")
+                  return
+
+              metric_data = [
+                  {
+                      "MetricName": "TotalHourlySavings",
+                      "Dimensions": [
+                          {"Name": "Region", "Value": report["region"]},
+                      ],
+                      "Timestamp": timestamp,
+                      "Value": report["total_hourly_savings"],
+                      "Unit": "None",
+                  }
+              ]
+
+              for instance in report["instances"]:
+                  metric_data.append(
+                      {
+                          "MetricName": "InstanceHourlySavings",
+                          "Dimensions": [
+                              {"Name": "Region", "Value": report["region"]},
+                              {"Name": "InstanceId", "Value": instance["instance_id"]},
+                          ],
+                          "Timestamp": timestamp,
+                          "Value": instance["hourly_savings"],
+                          "Unit": "None",
+                      }
+                  )
+
+              for i in range(0, len(metric_data), 20):
+                  batch = metric_data[i : i + 20]
+                  cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+
+          def record_savings(savings_records):
+              if not savings_records:
+                  print("No savings to record.")
+                  return
+
+              now = datetime.datetime.utcnow()
+              timestamp = now.replace(microsecond=0).isoformat() + "Z"
+              data = {
+                  "timestamp": timestamp,
+                  "region": get_region(),
+                  "savings_plan_discount_percent": round(
+                      (1 - get_savings_plan_factor()) * 100, 4
+                  ),
+                  "savings_plan_discount_source": SAVINGS_PLAN_FACTOR_SOURCE,
+                  "total_hourly_savings": round(sum(r["hourly_savings"] for r in savings_records), 4),
+                  "instances": savings_records,
+              }
+
+              key = f"savings/{now.date()}/{timestamp}.json"
+              bucket = os.environ.get("SAVINGS_BUCKET")
+              if not bucket:
+                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
+              print(f"Writing savings report to s3://{bucket}/{key}")
+              s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data, indent=2).encode("utf-8"))
+              publish_savings_metrics(data, now)
 
           def lambda_handler(event, context):
               action = event.get("action")
@@ -95,6 +535,8 @@ Resources:
                   ]
               )["Reservations"]
 
+              savings_records = []
+
               for reservation in reservations:
                   for instance in reservation["Instances"]:
                       instance_id = instance["InstanceId"]
@@ -105,7 +547,9 @@ Resources:
                       print(f"\nProcessing {instance_id} ({state}, {current_type})")
 
                       if action == "scaledown":
-                          if current_type == DOWNSIZE_TYPE:
+                          downsize_type = get_downsize_type()
+
+                          if current_type == downsize_type:
                               print("Already at downsized type. Skipping.")
                               continue
 
@@ -114,7 +558,38 @@ Resources:
                               Resources=[instance_id],
                               Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
                           )
-                          desired_type = DOWNSIZE_TYPE
+                          desired_type = downsize_type
+
+                          try:
+                              pricing_filters, pricing_source = get_instance_pricing_profile(instance)
+                              print(
+                                  "Using pricing profile for "
+                                  f"{instance_id}: {pricing_filters} (source={pricing_source})"
+                              )
+                              original_rate = get_hourly_rate(current_type, pricing_filters)
+                              downsized_rate = get_hourly_rate(desired_type, pricing_filters)
+                              hourly_savings = max(original_rate - downsized_rate, 0)
+                              hourly_savings *= get_savings_plan_factor()
+                              savings_records.append(
+                                  {
+                                      "instance_id": instance_id,
+                                      "previous_type": current_type,
+                                      "downsized_type": desired_type,
+                                      "pricing_operating_system": pricing_filters["operatingSystem"],
+                                      "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
+                                      "pricing_license_model": pricing_filters["licenseModel"],
+                                      "pricing_profile_source": pricing_source,
+                                      "hourly_savings": round(hourly_savings, 4),
+                                  }
+                              )
+                              print(
+                                  f"Estimated hourly savings for {instance_id}: ${hourly_savings:.4f}"
+                              )
+                          except Exception as pricing_error:
+                              print(
+                                  "Unable to calculate savings for "
+                                  f"{instance_id}: {pricing_error}"
+                              )
 
                       elif action == "scaleup":
                           desired_type = tags.get("PreferredInstanceType")
@@ -165,6 +640,9 @@ Resources:
 
               print("Lambda execution completed.")
 
+              if action == "scaledown":
+                  record_savings(savings_records)
+
   EC2ScalerScheduleDown:
     Type: AWS::Events::Rule
     DependsOn: EC2ScalerFunction
@@ -172,6 +650,7 @@ Resources:
       Name: EC2ScalerScheduleDown
       Description: Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleDownTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
@@ -185,11 +664,15 @@ Resources:
       Name: EC2ScalerScheduleUp
       Description: Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleUpTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
           Id: UpTarget
           Input: '{"action": "scaleup", "source": "eventbridge"}'
+
+  SavingsLogBucket:
+    Type: AWS::S3::Bucket
 
   LambdaInvokePermissionDown:
     Type: AWS::Lambda::Permission
