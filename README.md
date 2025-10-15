@@ -44,7 +44,7 @@ To deploy with AWS Console:
 ## 📝 Customization
 
 - **Resize Target:** The off-hours instance type defaults to `t3.medium`. You can change this in the Lambda code.
-- **Schedule:** Default schedule is hardcoded for Pacific Time. You can update the EventBridge cron rules if needed.
+- **Schedule:** Default EventBridge cron rules are pinned to 4 AM and 7 PM Pacific (with automatic DST handling via `ScheduleExpressionTimezone: America/Los_Angeles`). Update the `LambdaScheduleUpTime`/`LambdaScheduleDownTime` parameters if you need different windows.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 
 ## 🧪 Testing
