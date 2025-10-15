@@ -157,7 +157,35 @@ Resources:
           VALID_ACTIONS = {"scaleup", "scaledown"}
 
           REGION_NAME_MAP = {
+              "af-south-1": "Africa (Cape Town)",
+              "ap-east-1": "Asia Pacific (Hong Kong)",
+              "ap-northeast-1": "Asia Pacific (Tokyo)",
+              "ap-northeast-2": "Asia Pacific (Seoul)",
+              "ap-northeast-3": "Asia Pacific (Osaka)",
+              "ap-south-1": "Asia Pacific (Mumbai)",
+              "ap-south-2": "Asia Pacific (Hyderabad)",
+              "ap-southeast-1": "Asia Pacific (Singapore)",
+              "ap-southeast-2": "Asia Pacific (Sydney)",
+              "ap-southeast-3": "Asia Pacific (Jakarta)",
+              "ap-southeast-4": "Asia Pacific (Melbourne)",
+              "ap-southeast-5": "Asia Pacific (Malaysia)",
+              "ca-central-1": "Canada (Central)",
+              "ca-west-1": "Canada West (Calgary)",
+              "eu-central-1": "EU (Frankfurt)",
+              "eu-central-2": "EU (Zurich)",
+              "eu-north-1": "EU (Stockholm)",
+              "eu-south-1": "EU (Milan)",
+              "eu-south-2": "EU (Spain)",
+              "eu-west-1": "EU (Ireland)",
+              "eu-west-2": "EU (London)",
+              "eu-west-3": "EU (Paris)",
+              "il-central-1": "Israel (Tel Aviv)",
+              "me-central-1": "Middle East (UAE)",
+              "me-south-1": "Middle East (Bahrain)",
+              "sa-east-1": "South America (São Paulo)",
+              "us-east-1": "US East (N. Virginia)",
               "us-east-2": "US East (Ohio)",
+              "us-west-1": "US West (N. California)",
               "us-west-2": "US West (Oregon)",
           }
 
@@ -259,7 +287,11 @@ Resources:
           def get_location(region_name):
               location = REGION_NAME_MAP.get(region_name)
               if not location:
-                  raise ValueError(f"Unsupported region for pricing lookup: {region_name}")
+                  supported_regions = ", ".join(sorted(REGION_NAME_MAP))
+                  raise ValueError(
+                      "Unsupported region for pricing lookup: "
+                      f"{region_name}. Supported regions: {supported_regions}"
+                  )
               return location
 
           def build_pricing_cache_key(instance_type, pricing_filters):
@@ -294,52 +326,125 @@ Resources:
 
               region_name = get_region()
               location = get_location(region_name)
-              filters = [
-                  {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
-                  {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                  {
-                      "Type": "TERM_MATCH",
-                      "Field": "operatingSystem",
-                      "Value": pricing_filters["operatingSystem"],
-                  },
-                  {
-                      "Type": "TERM_MATCH",
-                      "Field": "preInstalledSw",
-                      "Value": pricing_filters["preInstalledSw"],
-                  },
-                  {
-                      "Type": "TERM_MATCH",
-                      "Field": "licenseModel",
-                      "Value": pricing_filters["licenseModel"],
-                  },
-                  {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
-                  {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
-              ]
 
-              response = pricing.get_products(
-                  ServiceCode="AmazonEC2",
-                  Filters=filters,
-                  MaxResults=1,
-              )
+              def build_filters():
+                  attribute_filters = []
+                  for field in ("operatingSystem", "preInstalledSw", "licenseModel"):
+                      value = pricing_filters.get(field)
+                      if value:
+                          attribute_filters.append(
+                              {"Type": "TERM_MATCH", "Field": field, "Value": value}
+                          )
 
-              price_list = response.get("PriceList")
-              if not price_list:
-                  raise ValueError(
-                      "No pricing information found for "
-                      f"{instance_type} ({pricing_filters}) in {region_name}"
+                  base_filters = [
+                      {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
+                      {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+                  ]
+                  base_filters.extend(attribute_filters)
+                  base_filters.extend(
+                      [
+                          {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
+                          {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
+                      ]
+                  )
+                  return base_filters
+
+              def remove_filter(filters, field_name):
+                  return [
+                      filter_item
+                      for filter_item in filters
+                      if filter_item.get("Field") != field_name
+                  ]
+
+              def update_filter(filters, field_name, value):
+                  updated = []
+                  for filter_item in filters:
+                      if filter_item.get("Field") == field_name:
+                          updated.append({**filter_item, "Value": value})
+                      else:
+                          updated.append(dict(filter_item))
+                  return updated
+
+              def serialize_filters(filters):
+                  return tuple(
+                      sorted(
+                          (item.get("Field"), item.get("Value"))
+                          for item in filters
+                      )
                   )
 
-              price_item = json.loads(price_list[0])
-              on_demand_terms = price_item["terms"].get("OnDemand", {})
-              for term in on_demand_terms.values():
-                  price_dimensions = term.get("priceDimensions", {})
-                  for dimension in price_dimensions.values():
-                      price = float(dimension["pricePerUnit"].get("USD", "0"))
+              def format_filters(filters):
+                  parts = []
+                  for item in filters:
+                      field = item.get("Field")
+                      value = item.get("Value")
+                      if field and value:
+                          parts.append(f"{field}={value}")
+                  return ", ".join(parts)
+
+              base_filters = build_filters()
+              filter_variants = [base_filters]
+
+              license_value = pricing_filters.get("licenseModel")
+              if license_value:
+                  if license_value == "License Included":
+                      filter_variants.append(
+                          update_filter(base_filters, "licenseModel", "No License required")
+                      )
+                  filter_variants.append(remove_filter(base_filters, "licenseModel"))
+
+              preinstalled_value = pricing_filters.get("preInstalledSw")
+              if preinstalled_value:
+                  filter_variants.append(remove_filter(base_filters, "preInstalledSw"))
+
+              if license_value and preinstalled_value:
+                  filter_variants.append(
+                      remove_filter(
+                          remove_filter(base_filters, "licenseModel"),
+                          "preInstalledSw",
+                      )
+                  )
+
+              unique_variants = []
+              seen_variants = set()
+              for candidate in filter_variants:
+                  signature = serialize_filters(candidate)
+                  if signature not in seen_variants:
+                      seen_variants.add(signature)
+                      unique_variants.append(candidate)
+
+              attempted_filters = []
+
+              def try_filters(filters_to_use):
+                  response = pricing.get_products(
+                      ServiceCode="AmazonEC2",
+                      Filters=filters_to_use,
+                      MaxResults=1,
+                  )
+                  price_list = response.get("PriceList")
+                  attempted_filters.append(format_filters(filters_to_use))
+                  if not price_list:
+                      return None
+
+                  price_item = json.loads(price_list[0])
+                  on_demand_terms = price_item["terms"].get("OnDemand", {})
+                  for term in on_demand_terms.values():
+                      price_dimensions = term.get("priceDimensions", {})
+                      for dimension in price_dimensions.values():
+                          return float(dimension["pricePerUnit"].get("USD", "0"))
+                  return None
+
+              for filters_to_use in unique_variants:
+                  price = try_filters(filters_to_use)
+                  if price is not None:
                       PRICE_CACHE[cache_key] = price
                       return price
 
+              attempted_summary = "; ".join(attempted_filters) or "(none)"
               raise ValueError(
-                  f"Unable to parse pricing information for {instance_type} ({pricing_filters})"
+                  "No pricing information found for "
+                  f"{instance_type} ({pricing_filters}) in {region_name} "
+                  f"using filters: {attempted_summary}"
               )
 
           def parse_float(value, default=0.0):
