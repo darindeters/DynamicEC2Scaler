@@ -556,6 +556,13 @@ Resources:
                   ]
               )["Reservations"]
 
+              if not reservations:
+                  print(
+                      "No EC2 instances matched DynamicInstanceScaling=true in running/stopped states. "
+                      "Skipping stop/modify/start workflow and savings recording."
+                  )
+                  return {"processed_instances": 0, "action": action}
+
               savings_records = []
 
               for reservation in reservations:
