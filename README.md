@@ -6,8 +6,8 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 ## 🔧 How It Works
 
 - A Lambda function runs twice per day via EventBridge rules:
-  - **7 PM Pacific** — Scales down tagged instances to a smaller type (e.g. `t3.medium`)
-  - **4 AM Pacific (Mon–Fri only)** — Scales them back up to the original size
+  - **Scale down at 7 PM Pacific (Standard Time)** — Implemented as `cron(0 3 ? * TUE-SAT *)`, which is 7 PM PT when UTC offset is −8. Switch to `cron(0 2 ? * TUE-SAT *)` during Daylight Saving Time or use the stack parameter to supply expressions for another timezone.
+  - **Scale up at 4 AM Pacific (Mon–Fri, Standard Time)** — Implemented as `cron(0 12 ? * MON-FRI *)`. During Daylight Saving Time use `cron(0 11 ? * MON-FRI *)` to keep a 4 AM local start.
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
@@ -47,7 +47,7 @@ To deploy with AWS Console:
 ## 📝 Customization
 
 - **Resize Target:** Control the off-hours instance type with the `OffHoursInstanceType` stack parameter (defaults to `t3.medium`).
-- **Schedule:** Default schedule is hardcoded for Pacific Time. You can update the EventBridge cron rules if needed.
+- **Schedule:** Default cron expressions target Pacific working hours by converting the desired local times into UTC because `AWS::Events::Rule` does not currently support the `ScheduleExpressionTimezone` property. Update the `LambdaScheduleUpTime` and `LambdaScheduleDownTime` parameters to match your timezone or to account for Daylight Saving Time.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 - **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`). You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.
 - **Savings Plan Discount:** Choose whether to provide a manual discount percentage (`SavingsPlanDiscountPercent`) or let the stack derive an effective rate from recent Cost Explorer coverage data by setting `SavingsPlanDiscountMode` to `Coverage`. Coverage mode uses the `ce:GetSavingsPlansCoverage` API (ensure Cost Explorer is enabled) and averages the last `SavingsPlanCoverageLookbackDays` (30 by default).
