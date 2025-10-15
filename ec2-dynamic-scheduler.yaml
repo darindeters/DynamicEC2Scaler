@@ -172,7 +172,7 @@ Resources:
                   "windows with sql server enterprise",
                   {
                       "operatingSystem": "Windows",
-                      "preInstalledSw": "SQL Ent",
+                      "preInstalledSw": "SQL Server Enterprise",
                       "licenseModel": "License Included",
                   },
               ),
@@ -180,7 +180,7 @@ Resources:
                   "windows with sql server standard",
                   {
                       "operatingSystem": "Windows",
-                      "preInstalledSw": "SQL Std",
+                      "preInstalledSw": "SQL Server Standard",
                       "licenseModel": "License Included",
                   },
               ),
@@ -188,7 +188,7 @@ Resources:
                   "windows with sql server web",
                   {
                       "operatingSystem": "Windows",
-                      "preInstalledSw": "SQL Web",
+                      "preInstalledSw": "SQL Server Web",
                       "licenseModel": "License Included",
                   },
               ),
