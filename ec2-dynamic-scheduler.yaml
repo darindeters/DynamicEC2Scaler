@@ -25,6 +25,19 @@ Parameters:
     MinValue: 0
     MaxValue: 100
     Description: Percentage discount applied to On-Demand rates by an account-wide Compute Savings Plan (0-100).
+  SavingsPlanDiscountMode:
+    Type: String
+    Default: Manual
+    AllowedValues:
+      - Manual
+      - Coverage
+    Description: Controls how Savings Plan discounts are applied (Manual uses the provided percentage, Coverage derives an effective rate from Cost Explorer).
+  SavingsPlanCoverageLookbackDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 90
+    Description: Lookback window (in days) to use when deriving Savings Plan coverage data from Cost Explorer.
 
 Resources:
 
@@ -77,6 +90,10 @@ Resources:
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ce:GetSavingsPlansCoverage
+                Resource: "*"
 
   EC2ScalerFunction:
     Type: AWS::Lambda::Function
@@ -93,6 +110,8 @@ Resources:
         Variables:
           SAVINGS_BUCKET: !Ref SavingsLogBucket
           SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
+          SAVINGS_PLAN_DISCOUNT_MODE: !Ref SavingsPlanDiscountMode
+          SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS: !Ref SavingsPlanCoverageLookbackDays
           SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
           OFF_HOURS_INSTANCE_TYPE: !Ref OffHoursInstanceType
       Code:
@@ -106,9 +125,11 @@ Resources:
           pricing = boto3.client('pricing', region_name='us-east-1')
           s3 = boto3.client('s3')
           cloudwatch = boto3.client('cloudwatch')
+          cost_explorer = boto3.client('ce', region_name='us-east-1')
           session = boto3.session.Session()
           PRICE_CACHE = {}
           SAVINGS_PLAN_FACTOR = None
+          SAVINGS_PLAN_FACTOR_SOURCE = None
           DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 
           DEFAULT_DOWNSIZE_TYPE = "t3.medium"
@@ -190,11 +211,13 @@ Resources:
 
               raise ValueError(f"Unable to parse pricing information for {instance_type}")
 
-          def get_savings_plan_factor():
-              global SAVINGS_PLAN_FACTOR
-              if SAVINGS_PLAN_FACTOR is not None:
-                  return SAVINGS_PLAN_FACTOR
+          def parse_float(value, default=0.0):
+              try:
+                  return float(value)
+              except (TypeError, ValueError):
+                  return default
 
+          def get_manual_discount_factor():
               raw_value = os.environ.get("SAVINGS_PLAN_DISCOUNT_PERCENT", "0")
               try:
                   discount_percent = float(raw_value)
@@ -208,7 +231,82 @@ Resources:
                       "SAVINGS_PLAN_DISCOUNT_PERCENT must be between 0 and 100"
                   )
 
-              SAVINGS_PLAN_FACTOR = 1 - (discount_percent / 100.0)
+              return 1 - (discount_percent / 100.0)
+
+          def get_coverage_discount_factor():
+              raw_lookback = os.environ.get("SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS", "30")
+              try:
+                  lookback_days = int(raw_lookback)
+              except ValueError as exc:
+                  raise ValueError(
+                      "SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS must be an integer between 1 and 90"
+                  ) from exc
+
+              if lookback_days < 1 or lookback_days > 90:
+                  raise ValueError(
+                      "SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS must be between 1 and 90"
+                  )
+
+              end_date = datetime.date.today()
+              start_date = end_date - datetime.timedelta(days=lookback_days)
+
+              total_savings = 0.0
+              total_cost = 0.0
+              next_token = None
+
+              while True:
+                  kwargs = {
+                      "TimePeriod": {
+                          "Start": start_date.isoformat(),
+                          "End": end_date.isoformat(),
+                      },
+                      "Granularity": "DAILY",
+                  }
+                  if next_token:
+                      kwargs["NextToken"] = next_token
+
+                  response = cost_explorer.get_savings_plans_coverage(**kwargs)
+                  for coverage in response.get("SavingsPlansCoverages", []):
+                      data = coverage.get("Coverage", {})
+                      total_savings += parse_float(data.get("SavingsPlansSavings"))
+                      total_cost += parse_float(data.get("TotalCost"))
+
+                  next_token = response.get("NextToken")
+                  if not next_token:
+                      break
+
+              denominator = total_cost + total_savings
+              if denominator <= 0:
+                  raise ValueError("Savings Plan coverage data is empty for the selected window")
+
+              discount_percent = max(min(total_savings / denominator, 0.9999), 0.0) * 100
+              print(
+                  "Derived Savings Plan discount percent from Cost Explorer coverage: "
+                  f"{discount_percent:.4f}% over the last {lookback_days} days"
+              )
+              return 1 - (discount_percent / 100.0)
+
+          def get_savings_plan_factor():
+              global SAVINGS_PLAN_FACTOR
+              global SAVINGS_PLAN_FACTOR_SOURCE
+              if SAVINGS_PLAN_FACTOR is not None:
+                  return SAVINGS_PLAN_FACTOR
+
+              mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
+
+              if mode == "coverage":
+                  try:
+                      SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
+                      SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
+                      return SAVINGS_PLAN_FACTOR
+                  except Exception as coverage_error:
+                      print(
+                          "Falling back to manual Savings Plan discount due to coverage error: "
+                          f"{coverage_error}"
+                      )
+
+              SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
+              SAVINGS_PLAN_FACTOR_SOURCE = "manual"
               return SAVINGS_PLAN_FACTOR
 
           def get_metric_namespace():
@@ -275,6 +373,7 @@ Resources:
                   "savings_plan_discount_percent": round(
                       (1 - get_savings_plan_factor()) * 100, 4
                   ),
+                  "savings_plan_discount_source": SAVINGS_PLAN_FACTOR_SOURCE,
                   "total_hourly_savings": round(sum(r["hourly_savings"] for r in savings_records), 4),
                   "instances": savings_records,
               }

@@ -32,6 +32,7 @@ The Lambda function follows a least privilege model. It can only modify EC2 inst
 - Create EBS volume grants (for encrypted volumes)
 - Write logs to CloudWatch Logs (14-day retention)
 - Write savings reports to an S3 bucket created by the stack
+- Query Cost Explorer Savings Plan coverage metrics when coverage-based discounts are enabled
 
 ## 📦 Deployment
 
@@ -49,7 +50,7 @@ To deploy with AWS Console:
 - **Schedule:** Default schedule is hardcoded for Pacific Time. You can update the EventBridge cron rules if needed.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 - **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`). You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.
-- **Savings Plan Discount:** Provide your account-wide Compute Savings Plan discount (0-100%) via the `SavingsPlanDiscountPercent` parameter so savings reports reflect the discounted hourly rates instead of public On-Demand pricing.
+- **Savings Plan Discount:** Choose whether to provide a manual discount percentage (`SavingsPlanDiscountPercent`) or let the stack derive an effective rate from recent Cost Explorer coverage data by setting `SavingsPlanDiscountMode` to `Coverage`. Coverage mode uses the `ce:GetSavingsPlansCoverage` API (ensure Cost Explorer is enabled) and averages the last `SavingsPlanCoverageLookbackDays` (30 by default).
 - **CloudWatch Metrics:** Use the `SavingsMetricNamespace` parameter to control where hourly savings metrics are published. These metrics expose the total run savings and per-instance estimates, enabling dashboards, anomaly detection, or cost alerts alongside the S3 JSON reports. Set the parameter to an empty string if you prefer to disable metric publication.
 
 ## 🧪 Testing
