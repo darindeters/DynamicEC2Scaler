@@ -7,10 +7,12 @@ Parameters:
     Default: DynamicEC2Scheduler
   LambdaScheduleUpTime:
     Type: String
-    Default: "cron(0 11 ? * MON-FRI *)"
+    Description: Cron expression for scaling tagged instances back up (defaults to 4 AM Pacific)
+    Default: "cron(0 4 ? * MON-FRI *)"
   LambdaScheduleDownTime:
     Type: String
-    Default: "cron(0 2 ? * MON-FRI *)"
+    Description: Cron expression for scaling tagged instances down (defaults to 7 PM Pacific)
+    Default: "cron(0 19 ? * MON-FRI *)"
 
 Resources:
 
@@ -172,6 +174,7 @@ Resources:
       Name: EC2ScalerScheduleDown
       Description: Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleDownTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
@@ -185,6 +188,7 @@ Resources:
       Name: EC2ScalerScheduleUp
       Description: Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleUpTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
