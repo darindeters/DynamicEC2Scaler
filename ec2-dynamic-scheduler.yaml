@@ -38,6 +38,23 @@ Parameters:
     MinValue: 1
     MaxValue: 90
     Description: Lookback window (in days) to use when deriving Savings Plan coverage data from Cost Explorer.
+  DefaultPricingOperatingSystem:
+    Type: String
+    Default: Linux
+    AllowedValues:
+      - Linux
+      - Windows
+      - RHEL
+      - SUSE
+    Description: Default operating system filter to use for pricing lookups when an instance platform cannot be detected.
+  DefaultPricingLicenseModel:
+    Type: String
+    Default: "No License required"
+    Description: Default license model filter to use for pricing lookups when an instance platform cannot be detected.
+  DefaultPricingPreInstalledSoftware:
+    Type: String
+    Default: NA
+    Description: Default pre-installed software filter to use for pricing lookups when an instance platform cannot be detected.
 
 Resources:
 
@@ -114,6 +131,9 @@ Resources:
           SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS: !Ref SavingsPlanCoverageLookbackDays
           SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
           OFF_HOURS_INSTANCE_TYPE: !Ref OffHoursInstanceType
+          DEFAULT_PRICING_OPERATING_SYSTEM: !Ref DefaultPricingOperatingSystem
+          DEFAULT_PRICING_LICENSE_MODEL: !Ref DefaultPricingLicenseModel
+          DEFAULT_PRICING_PREINSTALLED_SOFTWARE: !Ref DefaultPricingPreInstalledSoftware
       Code:
         ZipFile: |
           import boto3
@@ -140,6 +160,95 @@ Resources:
               "us-west-2": "US West (Oregon)",
           }
 
+          DEFAULT_PRICING_FILTERS = {
+              "operatingSystem": os.environ.get("DEFAULT_PRICING_OPERATING_SYSTEM", "Linux"),
+              "preInstalledSw": os.environ.get("DEFAULT_PRICING_PREINSTALLED_SOFTWARE", "NA"),
+              "licenseModel": os.environ.get("DEFAULT_PRICING_LICENSE_MODEL", "No License required"),
+          }
+
+          PLATFORM_FILTER_RULES = [
+              (
+                  "windows with sql server enterprise",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Ent",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows with sql server standard",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Std",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows with sql server web",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "SQL Web",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "windows",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "License Included",
+                  },
+              ),
+              (
+                  "bring your own license",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "Bring your own license",
+                  },
+              ),
+              (
+                  "byol",
+                  {
+                      "operatingSystem": "Windows",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "Bring your own license",
+                  },
+              ),
+              (
+                  "red hat enterprise linux",
+                  {
+                      "operatingSystem": "RHEL",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "rhel",
+                  {
+                      "operatingSystem": "RHEL",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "suse",
+                  {
+                      "operatingSystem": "SUSE",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+              (
+                  "linux",
+                  {
+                      "operatingSystem": "Linux",
+                      "preInstalledSw": "NA",
+                      "licenseModel": "No License required",
+                  },
+              ),
+          ]
+
           def get_region():
               region_name = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
               if not region_name:
@@ -152,28 +261,72 @@ Resources:
                   raise ValueError(f"Unsupported region for pricing lookup: {region_name}")
               return location
 
-          def get_hourly_rate(instance_type):
-              if instance_type in PRICE_CACHE:
-                  return PRICE_CACHE[instance_type]
+          def build_pricing_cache_key(instance_type, pricing_filters):
+              return (
+                  instance_type,
+                  pricing_filters.get("operatingSystem"),
+                  pricing_filters.get("preInstalledSw"),
+                  pricing_filters.get("licenseModel"),
+              )
+
+          def get_instance_pricing_profile(instance):
+              platform_candidates = [
+                  instance.get("PlatformDetails"),
+                  instance.get("Platform"),
+                  instance.get("UsageOperation"),
+              ]
+
+              for platform_text in platform_candidates:
+                  normalized = (platform_text or "").strip().lower()
+                  if not normalized:
+                      continue
+                  for match, filters in PLATFORM_FILTER_RULES:
+                      if match in normalized:
+                          return dict(filters), f"platform:{platform_text}"
+
+              return dict(DEFAULT_PRICING_FILTERS), "default"
+
+          def get_hourly_rate(instance_type, pricing_filters):
+              cache_key = build_pricing_cache_key(instance_type, pricing_filters)
+              if cache_key in PRICE_CACHE:
+                  return PRICE_CACHE[cache_key]
 
               region_name = get_region()
               location = get_location(region_name)
+              filters = [
+                  {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
+                  {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "operatingSystem",
+                      "Value": pricing_filters["operatingSystem"],
+                  },
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "preInstalledSw",
+                      "Value": pricing_filters["preInstalledSw"],
+                  },
+                  {
+                      "Type": "TERM_MATCH",
+                      "Field": "licenseModel",
+                      "Value": pricing_filters["licenseModel"],
+                  },
+                  {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
+                  {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
+              ]
+
               response = pricing.get_products(
                   ServiceCode="AmazonEC2",
-                  Filters=[
-                      {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
-                      {"Type": "TERM_MATCH", "Field": "location", "Value": location},
-                      {"Type": "TERM_MATCH", "Field": "operatingSystem", "Value": "Linux"},
-                      {"Type": "TERM_MATCH", "Field": "preInstalledSw", "Value": "NA"},
-                      {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
-                      {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
-                  ],
+                  Filters=filters,
                   MaxResults=1,
               )
 
               price_list = response.get("PriceList")
               if not price_list:
-                  raise ValueError(f"No pricing information found for {instance_type} in {region_name}")
+                  raise ValueError(
+                      "No pricing information found for "
+                      f"{instance_type} ({pricing_filters}) in {region_name}"
+                  )
 
               price_item = json.loads(price_list[0])
               on_demand_terms = price_item["terms"].get("OnDemand", {})
@@ -181,10 +334,12 @@ Resources:
                   price_dimensions = term.get("priceDimensions", {})
                   for dimension in price_dimensions.values():
                       price = float(dimension["pricePerUnit"].get("USD", "0"))
-                      PRICE_CACHE[instance_type] = price
+                      PRICE_CACHE[cache_key] = price
                       return price
 
-              raise ValueError(f"Unable to parse pricing information for {instance_type}")
+              raise ValueError(
+                  f"Unable to parse pricing information for {instance_type} ({pricing_filters})"
+              )
 
           def parse_float(value, default=0.0):
               try:
@@ -406,8 +561,13 @@ Resources:
                           desired_type = downsize_type
 
                           try:
-                              original_rate = get_hourly_rate(current_type)
-                              downsized_rate = get_hourly_rate(desired_type)
+                              pricing_filters, pricing_source = get_instance_pricing_profile(instance)
+                              print(
+                                  "Using pricing profile for "
+                                  f"{instance_id}: {pricing_filters} (source={pricing_source})"
+                              )
+                              original_rate = get_hourly_rate(current_type, pricing_filters)
+                              downsized_rate = get_hourly_rate(desired_type, pricing_filters)
                               hourly_savings = max(original_rate - downsized_rate, 0)
                               hourly_savings *= get_savings_plan_factor()
                               savings_records.append(
@@ -415,6 +575,10 @@ Resources:
                                       "instance_id": instance_id,
                                       "previous_type": current_type,
                                       "downsized_type": desired_type,
+                                      "pricing_operating_system": pricing_filters["operatingSystem"],
+                                      "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
+                                      "pricing_license_model": pricing_filters["licenseModel"],
+                                      "pricing_profile_source": pricing_source,
                                       "hourly_savings": round(hourly_savings, 4),
                                   }
                               )

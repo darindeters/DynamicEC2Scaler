@@ -11,7 +11,7 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
-- Each scale-down run estimates the discounted hourly savings per instance (respecting any configured Compute Savings Plan discount), stores a JSON report in an S3 bucket for cost tracking, and emits the totals to a CloudWatch Metrics namespace so you can build dashboards or alarms
+- Each scale-down run estimates the discounted hourly savings per instance (respecting any configured Compute Savings Plan discount), automatically matches Linux, Windows, and SQL Server license-included fleets to the right on-demand price, stores a JSON report in an S3 bucket for cost tracking, and emits the totals to a CloudWatch Metrics namespace so you can build dashboards or alarms
 
 ## 🏷️ Required EC2 Tags
 
@@ -52,6 +52,7 @@ To deploy with AWS Console:
 - **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`). You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.
 - **Savings Plan Discount:** Choose whether to provide a manual discount percentage (`SavingsPlanDiscountPercent`) or let the stack derive an effective rate from recent Cost Explorer coverage data by setting `SavingsPlanDiscountMode` to `Coverage`. Coverage mode uses the `ce:GetSavingsPlansCoverage` API (ensure Cost Explorer is enabled) and averages the last `SavingsPlanCoverageLookbackDays` (30 by default).
 - **CloudWatch Metrics:** Use the `SavingsMetricNamespace` parameter to control where hourly savings metrics are published. These metrics expose the total run savings and per-instance estimates, enabling dashboards, anomaly detection, or cost alerts alongside the S3 JSON reports. Set the parameter to an empty string if you prefer to disable metric publication.
+- **Pricing Detection:** The Lambda maps each instance's platform to the appropriate AWS Pricing filters before calculating savings. If an instance platform can't be detected, override the fallback filters with the `DefaultPricingOperatingSystem`, `DefaultPricingLicenseModel`, and `DefaultPricingPreInstalledSoftware` parameters instead of editing the function code.
 
 ## 🧪 Testing
 
@@ -70,7 +71,6 @@ To test in the Lambda console:
 
 If you are looking to extend the stack further, the following ideas can help deepen the savings insights or broaden operational coverage without forcing downstream customization in the Lambda code:
 
-- **Multi-OS Pricing Support:** Expand the pricing lookup filters in the function so Windows and SQL Server licensing models are costed accurately when they appear in your fleet.
 - **Rightsizing Recommendations:** Persist the observed instance hours and savings deltas to S3/CloudWatch and surface a daily or weekly summary that highlights candidates for permanent downsizing.
 - **Notification Hooks:** Wire optional SNS/Slack notifications into the CloudFormation parameters so operations teams are alerted when a resize or savings report fails.
 - **Override Schedules Per Tag:** Introduce additional opt-in tags (for example `DynamicScalingSchedule=weekends`) that map to distinct EventBridge cron expressions defined in the template.
