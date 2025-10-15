@@ -84,6 +84,7 @@ Resources:
                 Action:
                   - ec2:DescribeInstances
                   - ec2:DescribeTags
+                  - pricing:GetProducts
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
