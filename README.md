@@ -6,7 +6,7 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 ## 🔧 How It Works
 
 - A Lambda function runs twice per day via EventBridge rules:
-  - **7 PM Pacific** — Scales down tagged instances to a smaller type (e.g. `t3.medium`)
+  - **7 PM Pacific (Mon–Fri only)** — Scales down tagged instances to a smaller type (e.g. `t3.medium`)
   - **4 AM Pacific (Mon–Fri only)** — Scales them back up to the original size
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
@@ -45,6 +45,7 @@ To deploy with AWS Console:
 
 - **Resize Target:** The off-hours instance type defaults to `t3.medium`. You can change this in the Lambda code.
 - **Schedule:** Default EventBridge cron rules are pinned to 4 AM and 7 PM Pacific (with automatic DST handling via `ScheduleExpressionTimezone: America/Los_Angeles`). Update the `LambdaScheduleUpTime`/`LambdaScheduleDownTime` parameters if you need different windows.
+- **Redeployment:** Deploy or update the CloudFormation stack after changing schedule parameters so the EventBridge rules pick up the new cron expressions and timezone.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 
 ## 🧪 Testing
