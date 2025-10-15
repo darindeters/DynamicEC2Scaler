@@ -585,15 +585,14 @@ Resources:
                           if preferred_type:
                               print(
                                   "PreferredInstanceType tag already set to "
-                                  f"{preferred_type}. Preserving existing value and skipping downsizing."
+                                  f"{preferred_type}. Preserving existing value and continuing with downsizing."
                               )
-                              continue
-
-                          print(f"Tagging {instance_id} with PreferredInstanceType = {current_type}")
-                          ec2.create_tags(
-                              Resources=[instance_id],
-                              Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
-                          )
+                          else:
+                              print(f"Tagging {instance_id} with PreferredInstanceType = {current_type}")
+                              ec2.create_tags(
+                                  Resources=[instance_id],
+                                  Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
+                              )
                           desired_type = downsize_type
 
                           try:
