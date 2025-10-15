@@ -45,7 +45,7 @@ To deploy with AWS Console:
 
 ## 📝 Customization
 
-- **Resize Target:** The off-hours instance type defaults to `t3.medium`. You can change this in the Lambda code.
+- **Resize Target:** Control the off-hours instance type with the `OffHoursInstanceType` stack parameter (defaults to `t3.medium`).
 - **Schedule:** Default schedule is hardcoded for Pacific Time. You can update the EventBridge cron rules if needed.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 - **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`). You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.

@@ -11,6 +11,10 @@ Parameters:
   LambdaScheduleDownTime:
     Type: String
     Default: "cron(0 19 ? * MON-FRI *)"
+  OffHoursInstanceType:
+    Type: String
+    Default: t3.medium
+    Description: Instance type to apply during scale-down operations when downsizing instances.
   SavingsMetricNamespace:
     Type: String
     Default: "DynamicEC2Scaler/Savings"
@@ -90,6 +94,7 @@ Resources:
           SAVINGS_BUCKET: !Ref SavingsLogBucket
           SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
           SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
+          OFF_HOURS_INSTANCE_TYPE: !Ref OffHoursInstanceType
       Code:
         ZipFile: |
           import boto3
@@ -106,7 +111,7 @@ Resources:
           SAVINGS_PLAN_FACTOR = None
           DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 
-          DOWNSIZE_TYPE = "t3.medium"
+          DEFAULT_DOWNSIZE_TYPE = "t3.medium"
           VALID_ACTIONS = {"scaleup", "scaledown"}
 
           REGION_NAME_MAP = {
@@ -213,6 +218,14 @@ Resources:
               namespace = raw_value.strip()
               return namespace
 
+          def get_downsize_type():
+              raw_value = os.environ.get("OFF_HOURS_INSTANCE_TYPE")
+              if raw_value:
+                  downsized = raw_value.strip()
+                  if downsized:
+                      return downsized
+              return DEFAULT_DOWNSIZE_TYPE
+
           def publish_savings_metrics(report, timestamp):
               namespace = get_metric_namespace()
               if not namespace:
@@ -305,7 +318,9 @@ Resources:
                       print(f"\nProcessing {instance_id} ({state}, {current_type})")
 
                       if action == "scaledown":
-                          if current_type == DOWNSIZE_TYPE:
+                          downsize_type = get_downsize_type()
+
+                          if current_type == downsize_type:
                               print("Already at downsized type. Skipping.")
                               continue
 
@@ -314,7 +329,7 @@ Resources:
                               Resources=[instance_id],
                               Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
                           )
-                          desired_type = DOWNSIZE_TYPE
+                          desired_type = downsize_type
 
                           try:
                               original_rate = get_hourly_rate(current_type)
