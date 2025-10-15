@@ -492,30 +492,50 @@ Resources:
                   cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
 
           def record_savings(savings_records):
-              if not savings_records:
-                  print("No savings to record.")
-                  return
-
               now = datetime.datetime.utcnow()
               timestamp = now.replace(microsecond=0).isoformat() + "Z"
-              data = {
+              region = get_region()
+              savings_plan_factor = get_savings_plan_factor()
+              total_hourly_savings = round(
+                  sum(r["hourly_savings"] for r in savings_records), 4
+              ) if savings_records else 0.0
+
+              summary = {
                   "timestamp": timestamp,
-                  "region": get_region(),
+                  "region": region,
                   "savings_plan_discount_percent": round(
-                      (1 - get_savings_plan_factor()) * 100, 4
+                      (1 - savings_plan_factor) * 100, 4
                   ),
                   "savings_plan_discount_source": SAVINGS_PLAN_FACTOR_SOURCE,
-                  "total_hourly_savings": round(sum(r["hourly_savings"] for r in savings_records), 4),
+                  "total_hourly_savings": total_hourly_savings,
                   "instances": savings_records,
               }
+
+              if not savings_records:
+                  summary["zero_savings"] = True
+                  summary["zero_savings_reason"] = "no_savings_records_generated"
+                  summary["zero_savings_flags"] = ["no_savings_records"]
+
+              log_event = {
+                  "level": "INFO",
+                  "event": "SavingsRunSummary",
+                  "summary": summary,
+              }
+              print(json.dumps(log_event))
 
               key = f"savings/{now.date()}/{timestamp}.json"
               bucket = os.environ.get("SAVINGS_BUCKET")
               if not bucket:
                   raise ValueError("SAVINGS_BUCKET environment variable is not set")
               print(f"Writing savings report to s3://{bucket}/{key}")
-              s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data, indent=2).encode("utf-8"))
-              publish_savings_metrics(data, now)
+              s3.put_object(
+                  Bucket=bucket,
+                  Key=key,
+                  Body=json.dumps(summary, indent=2).encode("utf-8"),
+              )
+
+              if savings_records:
+                  publish_savings_metrics(summary, now)
 
           def lambda_handler(event, context):
               action = event.get("action")
