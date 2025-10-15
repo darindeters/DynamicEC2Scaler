@@ -13,6 +13,10 @@ Parameters:
     Type: String
     Description: Cron expression for scaling tagged instances down (defaults to 7 PM Pacific)
     Default: "cron(0 19 ? * MON-FRI *)"
+  LambdaScheduleTimezone:
+    Type: String
+    Description: Timezone identifier EventBridge should use when evaluating schedule expressions
+    Default: America/Los_Angeles
 
 Resources:
 
@@ -174,7 +178,7 @@ Resources:
       Name: EC2ScalerScheduleDown
       Description: Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleDownTime
-      ScheduleExpressionTimezone: America/Los_Angeles
+      ScheduleExpressionTimezone: !Ref LambdaScheduleTimezone
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
@@ -188,7 +192,7 @@ Resources:
       Name: EC2ScalerScheduleUp
       Description: Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleUpTime
-      ScheduleExpressionTimezone: America/Los_Angeles
+      ScheduleExpressionTimezone: !Ref LambdaScheduleTimezone
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
