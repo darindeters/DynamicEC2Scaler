@@ -11,6 +11,7 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
+- Each scale-down run estimates the discounted hourly savings per instance (respecting any configured Compute Savings Plan discount), stores a JSON report in an S3 bucket for cost tracking, and emits the totals to a CloudWatch Metrics namespace so you can build dashboards or alarms
 
 ## 🏷️ Required EC2 Tags
 
@@ -30,6 +31,7 @@ The Lambda function follows a least privilege model. It can only modify EC2 inst
 - Start/stop/modify EC2 instances
 - Create EBS volume grants (for encrypted volumes)
 - Write logs to CloudWatch Logs (14-day retention)
+- Write savings reports to an S3 bucket created by the stack
 
 ## 📦 Deployment
 
@@ -46,6 +48,9 @@ To deploy with AWS Console:
 - **Resize Target:** The off-hours instance type defaults to `t3.medium`. You can change this in the Lambda code.
 - **Schedule:** Default schedule is hardcoded for Pacific Time. You can update the EventBridge cron rules if needed.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
+- **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`). You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.
+- **Savings Plan Discount:** Provide your account-wide Compute Savings Plan discount (0-100%) via the `SavingsPlanDiscountPercent` parameter so savings reports reflect the discounted hourly rates instead of public On-Demand pricing.
+- **CloudWatch Metrics:** Use the `SavingsMetricNamespace` parameter to control where hourly savings metrics are published. These metrics expose the total run savings and per-instance estimates, enabling dashboards, anomaly detection, or cost alerts alongside the S3 JSON reports. Set the parameter to an empty string if you prefer to disable metric publication.
 
 ## 🧪 Testing
 

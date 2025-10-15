@@ -7,10 +7,20 @@ Parameters:
     Default: DynamicEC2Scheduler
   LambdaScheduleUpTime:
     Type: String
-    Default: "cron(0 11 ? * MON-FRI *)"
+    Default: "cron(0 4 ? * MON-FRI *)"
   LambdaScheduleDownTime:
     Type: String
-    Default: "cron(0 2 ? * MON-FRI *)"
+    Default: "cron(0 19 ? * MON-FRI *)"
+  SavingsMetricNamespace:
+    Type: String
+    Default: "DynamicEC2Scaler/Savings"
+    Description: CloudWatch metric namespace to use when publishing savings data.
+  SavingsPlanDiscountPercent:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+    Description: Percentage discount applied to On-Demand rates by an account-wide Compute Savings Plan (0-100).
 
 Resources:
 
@@ -55,6 +65,14 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:ResourceTag/DynamicInstanceScaling: "true"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${SavingsLogBucket}/*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
 
   EC2ScalerFunction:
     Type: AWS::Lambda::Function
@@ -67,14 +85,194 @@ Resources:
       MemorySize: 512
       ReservedConcurrentExecutions: 10
       Timeout: 300
+      Environment:
+        Variables:
+          SAVINGS_BUCKET: !Ref SavingsLogBucket
+          SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
+          SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
       Code:
         ZipFile: |
           import boto3
+          import datetime
+          import json
+          import os
           import time
           ec2 = boto3.client('ec2')
+          pricing = boto3.client('pricing', region_name='us-east-1')
+          s3 = boto3.client('s3')
+          cloudwatch = boto3.client('cloudwatch')
+          session = boto3.session.Session()
+          PRICE_CACHE = {}
+          SAVINGS_PLAN_FACTOR = None
+          DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 
           DOWNSIZE_TYPE = "t3.medium"
           VALID_ACTIONS = {"scaleup", "scaledown"}
+
+          REGION_NAME_MAP = {
+              "us-east-1": "US East (N. Virginia)",
+              "us-east-2": "US East (Ohio)",
+              "us-west-1": "US West (N. California)",
+              "us-west-2": "US West (Oregon)",
+              "af-south-1": "Africa (Cape Town)",
+              "ap-east-1": "Asia Pacific (Hong Kong)",
+              "ap-south-1": "Asia Pacific (Mumbai)",
+              "ap-south-2": "Asia Pacific (Hyderabad)",
+              "ap-southeast-1": "Asia Pacific (Singapore)",
+              "ap-southeast-2": "Asia Pacific (Sydney)",
+              "ap-southeast-3": "Asia Pacific (Jakarta)",
+              "ap-southeast-4": "Asia Pacific (Melbourne)",
+              "ap-northeast-1": "Asia Pacific (Tokyo)",
+              "ap-northeast-2": "Asia Pacific (Seoul)",
+              "ap-northeast-3": "Asia Pacific (Osaka)",
+              "ca-central-1": "Canada (Central)",
+              "eu-central-1": "EU (Frankfurt)",
+              "eu-central-2": "EU (Zurich)",
+              "eu-north-1": "EU (Stockholm)",
+              "eu-south-1": "EU (Milan)",
+              "eu-south-2": "EU (Spain)",
+              "eu-west-1": "EU (Ireland)",
+              "eu-west-2": "EU (London)",
+              "eu-west-3": "EU (Paris)",
+              "me-central-1": "Middle East (UAE)",
+              "me-south-1": "Middle East (Bahrain)",
+              "sa-east-1": "South America (São Paulo)",
+          }
+
+          def get_region():
+              region_name = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+              if not region_name:
+                  raise ValueError("AWS region could not be determined for pricing lookup")
+              return region_name
+
+          def get_location(region_name):
+              location = REGION_NAME_MAP.get(region_name)
+              if not location:
+                  raise ValueError(f"Unsupported region for pricing lookup: {region_name}")
+              return location
+
+          def get_hourly_rate(instance_type):
+              if instance_type in PRICE_CACHE:
+                  return PRICE_CACHE[instance_type]
+
+              region_name = get_region()
+              location = get_location(region_name)
+              response = pricing.get_products(
+                  ServiceCode="AmazonEC2",
+                  Filters=[
+                      {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
+                      {"Type": "TERM_MATCH", "Field": "location", "Value": location},
+                      {"Type": "TERM_MATCH", "Field": "operatingSystem", "Value": "Linux"},
+                      {"Type": "TERM_MATCH", "Field": "preInstalledSw", "Value": "NA"},
+                      {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
+                      {"Type": "TERM_MATCH", "Field": "capacitystatus", "Value": "Used"},
+                  ],
+                  MaxResults=1,
+              )
+
+              price_list = response.get("PriceList")
+              if not price_list:
+                  raise ValueError(f"No pricing information found for {instance_type} in {region_name}")
+
+              price_item = json.loads(price_list[0])
+              on_demand_terms = price_item["terms"].get("OnDemand", {})
+              for term in on_demand_terms.values():
+                  price_dimensions = term.get("priceDimensions", {})
+                  for dimension in price_dimensions.values():
+                      price = float(dimension["pricePerUnit"].get("USD", "0"))
+                      PRICE_CACHE[instance_type] = price
+                      return price
+
+              raise ValueError(f"Unable to parse pricing information for {instance_type}")
+
+          def get_savings_plan_factor():
+              global SAVINGS_PLAN_FACTOR
+              if SAVINGS_PLAN_FACTOR is not None:
+                  return SAVINGS_PLAN_FACTOR
+
+              raw_value = os.environ.get("SAVINGS_PLAN_DISCOUNT_PERCENT", "0")
+              try:
+                  discount_percent = float(raw_value)
+              except ValueError as exc:
+                  raise ValueError(
+                      "SAVINGS_PLAN_DISCOUNT_PERCENT must be a number between 0 and 100"
+                  ) from exc
+
+              if discount_percent < 0 or discount_percent > 100:
+                  raise ValueError(
+                      "SAVINGS_PLAN_DISCOUNT_PERCENT must be between 0 and 100"
+                  )
+
+              SAVINGS_PLAN_FACTOR = 1 - (discount_percent / 100.0)
+              return SAVINGS_PLAN_FACTOR
+
+          def get_metric_namespace():
+              raw_value = os.environ.get("SAVINGS_METRIC_NAMESPACE")
+              if raw_value is None:
+                  return DEFAULT_METRIC_NAMESPACE
+              namespace = raw_value.strip()
+              return namespace
+
+          def publish_savings_metrics(report, timestamp):
+              namespace = get_metric_namespace()
+              if not namespace:
+                  print("Savings metric namespace not configured. Skipping CloudWatch metrics.")
+                  return
+
+              metric_data = [
+                  {
+                      "MetricName": "TotalHourlySavings",
+                      "Dimensions": [
+                          {"Name": "Region", "Value": report["region"]},
+                      ],
+                      "Timestamp": timestamp,
+                      "Value": report["total_hourly_savings"],
+                      "Unit": "None",
+                  }
+              ]
+
+              for instance in report["instances"]:
+                  metric_data.append(
+                      {
+                          "MetricName": "InstanceHourlySavings",
+                          "Dimensions": [
+                              {"Name": "Region", "Value": report["region"]},
+                              {"Name": "InstanceId", "Value": instance["instance_id"]},
+                          ],
+                          "Timestamp": timestamp,
+                          "Value": instance["hourly_savings"],
+                          "Unit": "None",
+                      }
+                  )
+
+              for i in range(0, len(metric_data), 20):
+                  batch = metric_data[i : i + 20]
+                  cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+
+          def record_savings(savings_records):
+              if not savings_records:
+                  print("No savings to record.")
+                  return
+
+              now = datetime.datetime.utcnow()
+              timestamp = now.replace(microsecond=0).isoformat() + "Z"
+              data = {
+                  "timestamp": timestamp,
+                  "region": get_region(),
+                  "savings_plan_discount_percent": round(
+                      (1 - get_savings_plan_factor()) * 100, 4
+                  ),
+                  "total_hourly_savings": round(sum(r["hourly_savings"] for r in savings_records), 4),
+                  "instances": savings_records,
+              }
+
+              key = f"savings/{now.date()}/{timestamp}.json"
+              bucket = os.environ.get("SAVINGS_BUCKET")
+              if not bucket:
+                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
+              print(f"Writing savings report to s3://{bucket}/{key}")
+              s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data, indent=2).encode("utf-8"))
+              publish_savings_metrics(data, now)
 
           def lambda_handler(event, context):
               action = event.get("action")
@@ -94,6 +292,8 @@ Resources:
                       {"Name": "instance-state-name", "Values": ["running", "stopped"]}
                   ]
               )["Reservations"]
+
+              savings_records = []
 
               for reservation in reservations:
                   for instance in reservation["Instances"]:
@@ -115,6 +315,28 @@ Resources:
                               Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
                           )
                           desired_type = DOWNSIZE_TYPE
+
+                          try:
+                              original_rate = get_hourly_rate(current_type)
+                              downsized_rate = get_hourly_rate(desired_type)
+                              hourly_savings = max(original_rate - downsized_rate, 0)
+                              hourly_savings *= get_savings_plan_factor()
+                              savings_records.append(
+                                  {
+                                      "instance_id": instance_id,
+                                      "previous_type": current_type,
+                                      "downsized_type": desired_type,
+                                      "hourly_savings": round(hourly_savings, 4),
+                                  }
+                              )
+                              print(
+                                  f"Estimated hourly savings for {instance_id}: ${hourly_savings:.4f}"
+                              )
+                          except Exception as pricing_error:
+                              print(
+                                  "Unable to calculate savings for "
+                                  f"{instance_id}: {pricing_error}"
+                              )
 
                       elif action == "scaleup":
                           desired_type = tags.get("PreferredInstanceType")
@@ -165,6 +387,9 @@ Resources:
 
               print("Lambda execution completed.")
 
+              if action == "scaledown":
+                  record_savings(savings_records)
+
   EC2ScalerScheduleDown:
     Type: AWS::Events::Rule
     DependsOn: EC2ScalerFunction
@@ -172,6 +397,7 @@ Resources:
       Name: EC2ScalerScheduleDown
       Description: Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleDownTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
@@ -185,11 +411,15 @@ Resources:
       Name: EC2ScalerScheduleUp
       Description: Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday
       ScheduleExpression: !Ref LambdaScheduleUpTime
+      ScheduleExpressionTimezone: America/Los_Angeles
       State: ENABLED
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
           Id: UpTarget
           Input: '{"action": "scaleup", "source": "eventbridge"}'
+
+  SavingsLogBucket:
+    Type: AWS::S3::Bucket
 
   LambdaInvokePermissionDown:
     Type: AWS::Lambda::Permission
