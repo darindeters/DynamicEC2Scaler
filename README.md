@@ -44,7 +44,7 @@ To deploy with AWS Console:
 ## 📝 Customization
 
 - **Resize Target:** The off-hours instance type defaults to `t3.medium`. You can change this in the Lambda code.
-- **Schedule:** Default EventBridge cron rules are pinned to 4 AM and 7 PM Pacific (`cron(0 4 ? * MON-FRI *)` / `cron(0 19 ? * MON-FRI *)`). You can override the windows with the `LambdaScheduleUpTime`/`LambdaScheduleDownTime` parameters and adjust the timezone with `LambdaScheduleTimezone` (defaults to `America/Los_Angeles`).
+- **Schedule:** Default EventBridge cron rules are pinned to 4 AM and 7 PM Pacific (`cron(0 4 ? * MON-FRI *)` / `cron(0 19 ? * MON-FRI *)`). You can override the windows with the `LambdaScheduleUpTime`/`LambdaScheduleDownTime` parameters and adjust the timezone with `LambdaScheduleTimezone` (defaults to `America/Los_Angeles`). When upgrading from a previous template that used the legacy defaults (`cron(0 11 ? * MON-FRI *)` / `cron(0 2 ? * MON-FRI *)`), the stack automatically maps those values to the Pacific-friendly expressions so the run times stay aligned after the update.
 - **Redeployment:** Deploy or update the CloudFormation stack after changing schedule parameters so the EventBridge rules pick up the new cron expressions and timezone. After the update finishes, you can confirm the timezone and cron values with:
 
   ```bash

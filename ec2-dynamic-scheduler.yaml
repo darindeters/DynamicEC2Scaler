@@ -18,6 +18,14 @@ Parameters:
     Description: Timezone identifier EventBridge should use when evaluating schedule expressions
     Default: America/Los_Angeles
 
+Conditions:
+  UseMigratedUpSchedule: !And
+    - !Equals [!Ref LambdaScheduleUpTime, "cron(0 11 ? * MON-FRI *)"]
+    - !Equals [!Ref LambdaScheduleTimezone, "America/Los_Angeles"]
+  UseMigratedDownSchedule: !And
+    - !Equals [!Ref LambdaScheduleDownTime, "cron(0 2 ? * MON-FRI *)"]
+    - !Equals [!Ref LambdaScheduleTimezone, "America/Los_Angeles"]
+
 Resources:
 
   EC2ScalerLogGroup:
@@ -177,7 +185,10 @@ Resources:
     Properties:
       Name: EC2ScalerScheduleDown
       Description: Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday
-      ScheduleExpression: !Ref LambdaScheduleDownTime
+      ScheduleExpression: !If
+        - UseMigratedDownSchedule
+        - "cron(0 19 ? * MON-FRI *)"
+        - !Ref LambdaScheduleDownTime
       ScheduleExpressionTimezone: !Ref LambdaScheduleTimezone
       State: ENABLED
       Targets:
@@ -191,7 +202,10 @@ Resources:
     Properties:
       Name: EC2ScalerScheduleUp
       Description: Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday
-      ScheduleExpression: !Ref LambdaScheduleUpTime
+      ScheduleExpression: !If
+        - UseMigratedUpSchedule
+        - "cron(0 4 ? * MON-FRI *)"
+        - !Ref LambdaScheduleUpTime
       ScheduleExpressionTimezone: !Ref LambdaScheduleTimezone
       State: ENABLED
       Targets:
