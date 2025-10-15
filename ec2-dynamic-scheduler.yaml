@@ -554,6 +554,14 @@ Resources:
                               print("Already at downsized type. Skipping.")
                               continue
 
+                          preferred_type = (tags.get("PreferredInstanceType") or "").strip()
+                          if preferred_type:
+                              print(
+                                  "PreferredInstanceType tag already set to "
+                                  f"{preferred_type}. Preserving existing value and skipping downsizing."
+                              )
+                              continue
+
                           print(f"Tagging {instance_id} with PreferredInstanceType = {current_type}")
                           ec2.create_tags(
                               Resources=[instance_id],
