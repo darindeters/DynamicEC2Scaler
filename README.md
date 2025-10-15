@@ -64,3 +64,16 @@ To test in the Lambda console:
   "source": "Scheduled",
   "action": "scaleup"
 }
+```
+
+## 🚀 Suggested Future Enhancements
+
+If you are looking to extend the stack further, the following ideas can help deepen the savings insights or broaden operational coverage without forcing downstream customization in the Lambda code:
+
+- **Multi-OS Pricing Support:** Expand the pricing lookup filters in the function so Windows and SQL Server licensing models are costed accurately when they appear in your fleet.
+- **Rightsizing Recommendations:** Persist the observed instance hours and savings deltas to S3/CloudWatch and surface a daily or weekly summary that highlights candidates for permanent downsizing.
+- **Notification Hooks:** Wire optional SNS/Slack notifications into the CloudFormation parameters so operations teams are alerted when a resize or savings report fails.
+- **Override Schedules Per Tag:** Introduce additional opt-in tags (for example `DynamicScalingSchedule=weekends`) that map to distinct EventBridge cron expressions defined in the template.
+- **Savings Dashboard Template:** Publish an optional CloudWatch dashboard resource that visualizes the emitted savings metrics out of the box.
+
+These enhancements keep customization declarative by flowing new knobs through CloudFormation parameters instead of edits to the Lambda source.
