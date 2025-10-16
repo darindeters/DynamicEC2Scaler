@@ -1089,8 +1089,7 @@ Resources:
 
                       print(f"\nProcessing {instance_id} ({state}, {current_type})")
 
-                      actual_snapshot = None
-                      actual_snapshot_time = None
+                      actual_snapshot_params = None
 
                       if action == "scaledown":
                           downsize_type = get_downsize_type()
@@ -1171,15 +1170,12 @@ Resources:
                               print("Already at desired type. Skipping.")
                               continue
 
-                          actual_result = build_actual_savings_snapshot(
-                              instance_id=instance_id,
-                              tags=tags,
-                              desired_type=desired_type,
-                              current_type=current_type,
-                          )
-                          if actual_result:
-                              actual_snapshot, actual_snapshot_time = actual_result
-                              actual_savings_records.append(actual_snapshot)
+                          actual_snapshot_params = {
+                              "instance_id": instance_id,
+                              "tags": tags,
+                              "desired_type": desired_type,
+                              "current_type": current_type,
+                          }
 
                       if state != "stopped":
                           print(f"Stopping {instance_id}...")
@@ -1219,21 +1215,28 @@ Resources:
                       else:
                           raise Exception(f"{instance_id} did not reach 'running' state after 90 seconds.")
 
-                      if action == "scaleup" and actual_snapshot_time is not None:
-                          scale_up_timestamp_value = format_utc(actual_snapshot_time)
-                          ec2.create_tags(
-                              Resources=[instance_id],
-                              Tags=[
-                                  {
-                                      "Key": LAST_SCALE_UP_TIMESTAMP_TAG,
-                                      "Value": scale_up_timestamp_value,
-                                  }
-                              ],
+                      if action == "scaleup" and actual_snapshot_params is not None:
+                          actual_result = build_actual_savings_snapshot(
+                              **actual_snapshot_params
                           )
-                          print(
-                              f"Recorded scale-up metadata for {instance_id}: "
-                              f"timestamp={scale_up_timestamp_value}"
-                          )
+                          if actual_result:
+                              actual_snapshot, actual_snapshot_time = actual_result
+                              actual_savings_records.append(actual_snapshot)
+
+                              scale_up_timestamp_value = format_utc(actual_snapshot_time)
+                              ec2.create_tags(
+                                  Resources=[instance_id],
+                                  Tags=[
+                                      {
+                                          "Key": LAST_SCALE_UP_TIMESTAMP_TAG,
+                                          "Value": scale_up_timestamp_value,
+                                      }
+                                  ],
+                              )
+                              print(
+                                  f"Recorded scale-up metadata for {instance_id}: "
+                                  f"timestamp={scale_up_timestamp_value}"
+                              )
 
               print("Lambda execution completed.")
 
