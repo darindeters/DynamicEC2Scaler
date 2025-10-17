@@ -11,6 +11,14 @@ Parameters:
   LambdaScheduleDownTime:
     Type: String
     Default: "cron(0 3 ? * TUE-SAT *)"
+  BusinessHoursScheduleUpTime:
+    Type: String
+    Default: "cron(0 17 ? * MON-FRI *)"
+    Description: Cron expression that triggers the business-hours scale up (default 9 AM Pacific).
+  BusinessHoursScheduleDownTime:
+    Type: String
+    Default: "cron(0 2 ? * TUE-SAT *)"
+    Description: Cron expression that triggers the business-hours scale down (default 6 PM Pacific).
   ScheduleTagKey:
     Type: String
     Default: DynamicScalingSchedule
@@ -1462,6 +1470,32 @@ Resources:
           Id: UpTarget
           Input: '{"action": "scaleup", "source": "eventbridge", "schedule": "default"}'
 
+  EC2ScalerBusinessHoursScheduleDown:
+    Type: AWS::Events::Rule
+    DependsOn: EC2ScalerFunction
+    Properties:
+      Name: EC2ScalerBusinessHoursScheduleDown
+      Description: Triggers Lambda to scale down EC2 instances at 6 PM Pacific, Monday through Friday
+      ScheduleExpression: !Ref BusinessHoursScheduleDownTime
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2ScalerFunction.Arn
+          Id: BusinessHoursDownTarget
+          Input: '{"action": "scaledown", "source": "eventbridge", "schedule": "business-hours"}'
+
+  EC2ScalerBusinessHoursScheduleUp:
+    Type: AWS::Events::Rule
+    DependsOn: EC2ScalerFunction
+    Properties:
+      Name: EC2ScalerBusinessHoursScheduleUp
+      Description: Triggers Lambda to scale up EC2 instances at 9 AM Pacific, Monday through Friday
+      ScheduleExpression: !Ref BusinessHoursScheduleUpTime
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2ScalerFunction.Arn
+          Id: BusinessHoursUpTarget
+          Input: '{"action": "scaleup", "source": "eventbridge", "schedule": "business-hours"}'
+
   SavingsLogBucket:
     Type: AWS::S3::Bucket
 
@@ -1482,3 +1516,21 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt EC2ScalerScheduleUp.Arn
+
+  LambdaInvokePermissionBusinessHoursDown:
+    Type: AWS::Lambda::Permission
+    DependsOn: EC2ScalerBusinessHoursScheduleDown
+    Properties:
+      FunctionName: !Ref EC2ScalerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2ScalerBusinessHoursScheduleDown.Arn
+
+  LambdaInvokePermissionBusinessHoursUp:
+    Type: AWS::Lambda::Permission
+    DependsOn: EC2ScalerBusinessHoursScheduleUp
+    Properties:
+      FunctionName: !Ref EC2ScalerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2ScalerBusinessHoursScheduleUp.Arn
