@@ -26,6 +26,12 @@ Apply these tags to any EC2 instance you want managed by this scheduler:
 
 > ⚠️ The instance type will be resized to `t3.medium` by default during off-hours.
 
+### Optional Tags
+
+| Tag Key                  | Example Value      | Purpose                                                                 |
+|--------------------------|--------------------|-------------------------------------------------------------------------|
+| `DynamicScalingSchedule` | `default`, `all`   | Assigns the instance to an alternate schedule. Comma-separated values allow an instance to opt into multiple schedules; instances without this tag use the default schedule. |
+
 ## 🔐 IAM Permissions
 
 The Lambda function follows a least privilege model. It can only modify EC2 instances with the `DynamicInstanceScaling=true` tag. It also has scoped access to:
@@ -50,6 +56,8 @@ To deploy with AWS Console:
 
 - **Resize Target:** Control the off-hours instance type with the `OffHoursInstanceType` stack parameter (defaults to `t3.medium`).
 - **Schedule:** Default cron expressions target Pacific working hours by converting the desired local times into UTC because `AWS::Events::Rule` does not currently support the `ScheduleExpressionTimezone` property. Update the `LambdaScheduleUpTime` and `LambdaScheduleDownTime` parameters to match your timezone or to account for Daylight Saving Time.
+- **Multiple Schedules:** Use the `ScheduleTagKey` parameter (defaults to `DynamicScalingSchedule`) to choose which tag assigns instances to alternative schedules. Deploy additional EventBridge rules that invoke the Lambda with a different `schedule` payload (for example `"schedule": "team-b"`) and tag instances accordingly. A tag value of `all` opts an instance into every schedule.
+- **Parallel Operations:** Control how many instances are processed simultaneously with the `ConcurrentInstanceOperations` parameter (defaults to 4). The Lambda now uses AWS waiters and polling instead of fixed sleeps, dramatically reducing idle time during stop/modify/start sequences.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
 - **Savings Reports:** Every scale-down event writes a JSON summary to the provisioned S3 bucket (`SavingsLogBucket`) under `savings/<date>/<timestamp>.json`, which now captures projected downtime hours and projected total savings. Scale-up events complement this with measured results under `actual-savings/<date>/<timestamp>.json`, giving you both forecasted and realized savings without reprocessing the raw metrics. You can change the bucket properties or configure lifecycle rules by editing the CloudFormation template.
 - **Savings Plan Discount:** Choose whether to provide a manual discount percentage (`SavingsPlanDiscountPercent`) or let the stack derive an effective rate from recent Cost Explorer coverage data by setting `SavingsPlanDiscountMode` to `Coverage`. Coverage mode uses the `ce:GetSavingsPlansCoverage` API (ensure Cost Explorer is enabled) and averages the last `SavingsPlanCoverageLookbackDays` (30 by default).
