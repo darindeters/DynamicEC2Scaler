@@ -5,9 +5,9 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 
 ## 🔧 How It Works
 
-- A Lambda function runs twice per day via EventBridge rules:
-  - **Scale down at 7 PM Pacific (Standard Time)** — Implemented as `cron(0 3 ? * TUE-SAT *)`, which is 7 PM PT when UTC offset is −8. Switch to `cron(0 2 ? * TUE-SAT *)` during Daylight Saving Time or use the stack parameter to supply expressions for another timezone.
-  - **Scale up at 4 AM Pacific (Mon–Fri, Standard Time)** — Implemented as `cron(0 12 ? * MON-FRI *)`. During Daylight Saving Time use `cron(0 11 ? * MON-FRI *)` to keep a 4 AM local start.
+- A Lambda function runs on EventBridge schedules:
+  - **Default schedule** — Scales down at 7 PM Pacific (Standard Time) via `cron(0 3 ? * TUE-SAT *)` and scales up at 4 AM Pacific via `cron(0 12 ? * MON-FRI *)`. Switch to the Daylight Saving Time equivalents or update the stack parameters for other timezones.
+  - **Business-hours schedule** — Scales down at 6 PM Pacific via `cron(0 2 ? * TUE-SAT *)` and scales up at 9 AM Pacific via `cron(0 17 ? * MON-FRI *)`. Assign instances with the `DynamicScalingSchedule=business-hours` tag value to use it.
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
@@ -30,7 +30,7 @@ Apply these tags to any EC2 instance you want managed by this scheduler:
 
 | Tag Key                  | Example Value      | Purpose                                                                 |
 |--------------------------|--------------------|-------------------------------------------------------------------------|
-| `DynamicScalingSchedule` | `default`, `all`   | Assigns the instance to an alternate schedule. Comma-separated values allow an instance to opt into multiple schedules; instances without this tag use the default schedule. |
+| `DynamicScalingSchedule` | `default`, `business-hours`, `all`   | Assigns the instance to an alternate schedule. Comma-separated values allow an instance to opt into multiple schedules; instances without this tag use the default schedule. |
 
 ## 🔐 IAM Permissions
 
@@ -55,7 +55,7 @@ To deploy with AWS Console:
 ## 📝 Customization
 
 - **Resize Target:** Control the off-hours instance type with the `OffHoursInstanceType` stack parameter (defaults to `t3.medium`).
-- **Schedule:** Default cron expressions target Pacific working hours by converting the desired local times into UTC because `AWS::Events::Rule` does not currently support the `ScheduleExpressionTimezone` property. Update the `LambdaScheduleUpTime` and `LambdaScheduleDownTime` parameters to match your timezone or to account for Daylight Saving Time.
+- **Schedule:** Default cron expressions target Pacific working hours by converting the desired local times into UTC because `AWS::Events::Rule` does not currently support the `ScheduleExpressionTimezone` property. Update the `LambdaScheduleUpTime`, `LambdaScheduleDownTime`, `BusinessHoursScheduleUpTime`, and `BusinessHoursScheduleDownTime` parameters to match your timezone or to account for Daylight Saving Time.
 - **Multiple Schedules:** Use the `ScheduleTagKey` parameter (defaults to `DynamicScalingSchedule`) to choose which tag assigns instances to alternative schedules. Deploy additional EventBridge rules that invoke the Lambda with a different `schedule` payload (for example `"schedule": "team-b"`) and tag instances accordingly. A tag value of `all` opts an instance into every schedule.
 - **Parallel Operations:** Control how many instances are processed simultaneously with the `ConcurrentInstanceOperations` parameter (defaults to 4). The Lambda now uses AWS waiters and polling instead of fixed sleeps, dramatically reducing idle time during stop/modify/start sequences.
 - **Logging:** CloudWatch Log Group is created with 14-day retention. Logs show success and error messages per instance.
