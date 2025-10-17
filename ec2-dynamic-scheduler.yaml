@@ -11,10 +11,20 @@ Parameters:
   LambdaScheduleDownTime:
     Type: String
     Default: "cron(0 3 ? * TUE-SAT *)"
+  ScheduleTagKey:
+    Type: String
+    Default: DynamicScalingSchedule
+    Description: Tag key used to assign instances to alternative scaling schedules.
   OffHoursInstanceType:
     Type: String
     Default: t3.medium
     Description: Instance type to apply during scale-down operations when downsizing instances.
+  ConcurrentInstanceOperations:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 20
+    Description: Maximum number of EC2 instances to process concurrently.
   SavingsMetricNamespace:
     Type: String
     Default: "DynamicEC2Scaler/Savings"
@@ -137,22 +147,28 @@ Resources:
           DEFAULT_PRICING_PREINSTALLED_SOFTWARE: !Ref DefaultPricingPreInstalledSoftware
           SCALE_UP_CRON_EXPRESSION: !Ref LambdaScheduleUpTime
           SCALE_DOWN_CRON_EXPRESSION: !Ref LambdaScheduleDownTime
+          SCHEDULE_TAG_KEY: !Ref ScheduleTagKey
+          MAX_CONCURRENT_OPERATIONS: !Ref ConcurrentInstanceOperations
       Code:
         ZipFile: |
           import boto3
           import datetime
           import json
           import os
+          import threading
           import time
-          ec2 = boto3.client('ec2')
-          pricing = boto3.client('pricing', region_name='us-east-1')
-          s3 = boto3.client('s3')
-          cloudwatch = boto3.client('cloudwatch')
-          cost_explorer = boto3.client('ce', region_name='us-east-1')
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
           session = boto3.session.Session()
+          s3 = session.client("s3")
+          cloudwatch = session.client("cloudwatch")
+          cost_explorer = session.client("ce", region_name="us-east-1")
+          _thread_local = threading.local()
           PRICE_CACHE = {}
+          PRICE_CACHE_LOCK = threading.Lock()
           SAVINGS_PLAN_FACTOR = None
           SAVINGS_PLAN_FACTOR_SOURCE = None
+          SAVINGS_PLAN_LOCK = threading.Lock()
           DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 
           DEFAULT_DOWNSIZE_TYPE = "t3.medium"
@@ -162,6 +178,8 @@ Resources:
           LAST_SCALE_DOWN_HOURLY_TAG = "DynamicScalingLastScaleDownHourlySavings"
           LAST_SCALE_UP_TIMESTAMP_TAG = "DynamicScalingLastScaleUpTimestamp"
           SCALE_UP_CRON_ENV = "SCALE_UP_CRON_EXPRESSION"
+          DEFAULT_SCHEDULE_NAME = "default"
+          SCHEDULE_ALL_TOKEN = "all"
 
           REGION_NAME_MAP = {
               "af-south-1": "Africa (Cape Town)",
@@ -205,6 +223,91 @@ Resources:
               "SAT": 5,
               "SUN": 6,
           }
+
+          def get_ec2_client():
+              client = getattr(_thread_local, "ec2", None)
+              if client is None:
+                  client = session.client("ec2")
+                  _thread_local.ec2 = client
+              return client
+
+          def get_pricing_client():
+              client = getattr(_thread_local, "pricing", None)
+              if client is None:
+                  client = session.client("pricing", region_name="us-east-1")
+                  _thread_local.pricing = client
+              return client
+
+          def get_schedule_tag_key():
+              raw_key = os.environ.get("SCHEDULE_TAG_KEY", "DynamicScalingSchedule")
+              key = raw_key.strip()
+              return key or "DynamicScalingSchedule"
+
+          def normalize_schedule_name(value):
+              if value is None:
+                  return DEFAULT_SCHEDULE_NAME
+              normalized = value.strip().lower()
+              if not normalized:
+                  return DEFAULT_SCHEDULE_NAME
+              return normalized
+
+          def parse_schedule_tag_value(raw_value):
+              if not raw_value:
+                  return []
+              values = []
+              for token in raw_value.split(","):
+                  cleaned = token.strip().lower()
+                  if cleaned:
+                      values.append(cleaned)
+              return values
+
+          def instance_matches_schedule(tags, schedule_name):
+              if schedule_name == SCHEDULE_ALL_TOKEN:
+                  return True
+              schedule_tag_key = get_schedule_tag_key()
+              raw_value = tags.get(schedule_tag_key)
+              if not raw_value:
+                  return schedule_name == DEFAULT_SCHEDULE_NAME
+              values = parse_schedule_tag_value(raw_value)
+              if not values:
+                  return schedule_name == DEFAULT_SCHEDULE_NAME
+              if SCHEDULE_ALL_TOKEN in values:
+                  return True
+              return schedule_name in values
+
+          def get_concurrency_limit():
+              raw_value = os.environ.get("MAX_CONCURRENT_OPERATIONS")
+              if raw_value is None:
+                  return 4
+              try:
+                  value = int(str(raw_value).strip())
+              except (TypeError, ValueError):
+                  return 4
+              if value < 1:
+                  return 1
+              if value > 20:
+                  return 20
+              return value
+
+          def wait_for_instance_type(client, instance_id, desired_type, timeout_seconds=300, poll_interval=5):
+              print(f"Waiting for {instance_id} instance type to update to {desired_type}...")
+              deadline = time.time() + timeout_seconds
+              while time.time() < deadline:
+                  response = client.describe_instances(InstanceIds=[instance_id])
+                  reservations = response.get("Reservations", [])
+                  for reservation in reservations:
+                      for inst in reservation.get("Instances", []):
+                          current_type = inst.get("InstanceType")
+                          if current_type == desired_type:
+                              print(f"{instance_id} instance type confirmed as {desired_type}.")
+                              return
+                  remaining = deadline - time.time()
+                  if remaining <= 0:
+                      break
+                  time.sleep(min(poll_interval, max(remaining, 1)))
+              raise TimeoutError(
+                  f"Instance {instance_id} did not report instance type {desired_type} within {timeout_seconds} seconds."
+              )
 
           def format_utc(dt):
               if not isinstance(dt, datetime.datetime):
@@ -487,11 +590,14 @@ Resources:
 
           def get_hourly_rate(instance_type, pricing_filters):
               cache_key = build_pricing_cache_key(instance_type, pricing_filters)
-              if cache_key in PRICE_CACHE:
-                  return PRICE_CACHE[cache_key]
+              with PRICE_CACHE_LOCK:
+                  cached_price = PRICE_CACHE.get(cache_key)
+              if cached_price is not None:
+                  return cached_price
 
               region_name = get_region()
               location = get_location(region_name)
+              pricing_client = get_pricing_client()
 
               def build_filters():
                   attribute_filters = []
@@ -582,7 +688,7 @@ Resources:
               attempted_filters = []
 
               def try_filters(filters_to_use):
-                  response = pricing.get_products(
+                  response = pricing_client.get_products(
                       ServiceCode="AmazonEC2",
                       Filters=filters_to_use,
                       MaxResults=1,
@@ -603,7 +709,8 @@ Resources:
               for filters_to_use in unique_variants:
                   price = try_filters(filters_to_use)
                   if price is not None:
-                      PRICE_CACHE[cache_key] = price
+                      with PRICE_CACHE_LOCK:
+                          PRICE_CACHE[cache_key] = price
                       return price
 
               attempted_summary = "; ".join(attempted_filters) or "(none)"
@@ -691,25 +798,26 @@ Resources:
           def get_savings_plan_factor():
               global SAVINGS_PLAN_FACTOR
               global SAVINGS_PLAN_FACTOR_SOURCE
-              if SAVINGS_PLAN_FACTOR is not None:
-                  return SAVINGS_PLAN_FACTOR
-
-              mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
-
-              if mode == "coverage":
-                  try:
-                      SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
-                      SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
+              with SAVINGS_PLAN_LOCK:
+                  if SAVINGS_PLAN_FACTOR is not None:
                       return SAVINGS_PLAN_FACTOR
-                  except Exception as coverage_error:
-                      print(
-                          "Falling back to manual Savings Plan discount due to coverage error: "
-                          f"{coverage_error}"
-                      )
 
-              SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
-              SAVINGS_PLAN_FACTOR_SOURCE = "manual"
-              return SAVINGS_PLAN_FACTOR
+                  mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
+
+                  if mode == "coverage":
+                      try:
+                          SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
+                          SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
+                          return SAVINGS_PLAN_FACTOR
+                      except Exception as coverage_error:
+                          print(
+                              "Falling back to manual Savings Plan discount due to coverage error: "
+                              f"{coverage_error}"
+                          )
+
+                  SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
+                  SAVINGS_PLAN_FACTOR_SOURCE = "manual"
+                  return SAVINGS_PLAN_FACTOR
 
           def get_metric_namespace():
               raw_value = os.environ.get("SAVINGS_METRIC_NAMESPACE")
@@ -1047,9 +1155,154 @@ Resources:
               if actual_records:
                   publish_actual_savings_metrics(summary, run_time)
 
+          def process_instance(instance_data, action, run_start_timestamp, downsize_type=None):
+              instance = instance_data["instance"]
+              instance_id = instance_data["instance_id"]
+              current_type = instance_data["current_type"]
+              state = instance_data["state"]
+              tags = dict(instance_data["tags"])
+              ec2_client = get_ec2_client()
+
+              savings_record = None
+              actual_record = None
+              actual_snapshot_params = None
+
+              print(f"\nProcessing {instance_id} ({state}, {current_type})")
+
+              if action == "scaledown":
+                  desired_type = downsize_type or get_downsize_type()
+                  if current_type == desired_type:
+                      print("Already at downsized type. Skipping.")
+                      return False, None, None
+
+                  preferred_type = (tags.get("PreferredInstanceType") or "").strip()
+                  if preferred_type:
+                      print(
+                          "PreferredInstanceType tag already set to "
+                          f"{preferred_type}. Preserving existing value and continuing with downsizing."
+                      )
+                  else:
+                      print(f"Tagging {instance_id} with PreferredInstanceType = {current_type}")
+                      ec2_client.create_tags(
+                          Resources=[instance_id],
+                          Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
+                      )
+                      tags["PreferredInstanceType"] = current_type
+
+                  try:
+                      pricing_filters, pricing_source = get_instance_pricing_profile(instance)
+                      print(
+                          "Using pricing profile for "
+                          f"{instance_id}: {pricing_filters} (source={pricing_source})"
+                      )
+                      original_rate = get_hourly_rate(current_type, pricing_filters)
+                      downsized_rate = get_hourly_rate(desired_type, pricing_filters)
+                      hourly_savings = max(original_rate - downsized_rate, 0)
+                      hourly_savings *= get_savings_plan_factor()
+                      record = {
+                          "instance_id": instance_id,
+                          "previous_type": current_type,
+                          "downsized_type": desired_type,
+                          "pricing_operating_system": pricing_filters["operatingSystem"],
+                          "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
+                          "pricing_license_model": pricing_filters["licenseModel"],
+                          "pricing_profile_source": pricing_source,
+                          "hourly_savings": round(hourly_savings, 4),
+                          "scale_down_timestamp": run_start_timestamp,
+                      }
+                      savings_record = record
+                      ec2_client.create_tags(
+                          Resources=[instance_id],
+                          Tags=[
+                              {
+                                  "Key": LAST_SCALE_DOWN_TIMESTAMP_TAG,
+                                  "Value": run_start_timestamp,
+                              },
+                              {
+                                  "Key": LAST_SCALE_DOWN_HOURLY_TAG,
+                                  "Value": f"{hourly_savings:.4f}",
+                              },
+                          ],
+                      )
+                      print(
+                          "Recorded scale-down metadata for "
+                          f"{instance_id}: timestamp={run_start_timestamp}, "
+                          f"hourly_savings=${hourly_savings:.4f}"
+                      )
+                      print(
+                          f"Estimated hourly savings for {instance_id}: ${hourly_savings:.4f}"
+                      )
+                  except Exception as pricing_error:
+                      print(
+                          "Unable to calculate savings for "
+                          f"{instance_id}: {pricing_error}"
+                      )
+
+                  desired_type_value = desired_type
+
+              else:
+                  desired_type_value = (tags.get("PreferredInstanceType") or "").strip()
+                  if not desired_type_value:
+                      print("No PreferredInstanceType tag found. Skipping.")
+                      return False, None, None
+                  if current_type == desired_type_value:
+                      print("Already at desired type. Skipping.")
+                      return False, None, None
+
+                  actual_snapshot_params = {
+                      "instance_id": instance_id,
+                      "tags": tags,
+                      "desired_type": desired_type_value,
+                      "current_type": current_type,
+                  }
+
+              if state != "stopped":
+                  print(f"Stopping {instance_id}...")
+                  ec2_client.stop_instances(InstanceIds=[instance_id])
+                  ec2_client.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
+                  print(f"{instance_id} stopped.")
+              else:
+                  print(f"{instance_id} already stopped.")
+
+              print(f"Modifying {instance_id} to {desired_type_value}...")
+              ec2_client.modify_instance_attribute(
+                  InstanceId=instance_id,
+                  InstanceType={"Value": desired_type_value}
+              )
+              wait_for_instance_type(ec2_client, instance_id, desired_type_value)
+
+              print(f"Starting {instance_id}...")
+              ec2_client.start_instances(InstanceIds=[instance_id])
+              ec2_client.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+              print(f"{instance_id} is running.")
+
+              if action == "scaleup" and actual_snapshot_params is not None:
+                  actual_result = build_actual_savings_snapshot(
+                      **actual_snapshot_params
+                  )
+                  if actual_result:
+                      actual_record, actual_snapshot_time = actual_result
+                      scale_up_timestamp_value = format_utc(actual_snapshot_time)
+                      ec2_client.create_tags(
+                          Resources=[instance_id],
+                          Tags=[
+                              {
+                                  "Key": LAST_SCALE_UP_TIMESTAMP_TAG,
+                                  "Value": scale_up_timestamp_value,
+                              }
+                          ],
+                      )
+                      print(
+                          f"Recorded scale-up metadata for {instance_id}: "
+                          f"timestamp={scale_up_timestamp_value}"
+                      )
+
+              return True, savings_record, actual_record
+
           def lambda_handler(event, context):
               action = event.get("action")
               source = event.get("source", "manual")
+              schedule_name = normalize_schedule_name(event.get("schedule"))
 
               if action not in VALID_ACTIONS:
                   raise ValueError(f"Invalid or missing 'action'. Must be one of: {VALID_ACTIONS}")
@@ -1061,182 +1314,113 @@ Resources:
               set_run_start_time(run_start_time)
               run_start_timestamp = format_utc(run_start_time)
 
-              print(f"Starting EC2 {action} process...")
+              print(
+                  f"Starting EC2 {action} process for schedule '{schedule_name}'..."
+              )
 
-              reservations = ec2.describe_instances(
-                  Filters=[
-                      {"Name": "tag:DynamicInstanceScaling", "Values": ["true"]},
-                      {"Name": "instance-state-name", "Values": ["running", "stopped"]}
-                  ]
-              )["Reservations"]
+              ec2_client = get_ec2_client()
+              filters = [
+                  {"Name": "tag:DynamicInstanceScaling", "Values": ["true"]},
+                  {"Name": "instance-state-name", "Values": ["running", "stopped"]},
+              ]
+
+              reservations = []
+              paginator = ec2_client.get_paginator("describe_instances")
+              for page in paginator.paginate(Filters=filters):
+                  reservations.extend(page.get("Reservations", []))
 
               if not reservations:
                   print(
                       "No EC2 instances matched DynamicInstanceScaling=true in running/stopped states. "
                       "Skipping stop/modify/start workflow and savings recording."
                   )
-                  return {"processed_instances": 0, "action": action}
+                  return {
+                      "processed_instances": 0,
+                      "action": action,
+                      "schedule": schedule_name,
+                      "skipped_instances": 0,
+                  }
 
-              savings_records = []
-              actual_savings_records = []
+              instances_to_process = []
+              skipped_due_to_schedule = 0
 
               for reservation in reservations:
-                  for instance in reservation["Instances"]:
-                      instance_id = instance["InstanceId"]
-                      current_type = instance["InstanceType"]
-                      state = instance["State"]["Name"]
+                  for instance in reservation.get("Instances", []):
+                      instance_id = instance.get("InstanceId")
+                      current_type = instance.get("InstanceType")
+                      state = (instance.get("State") or {}).get("Name", "unknown")
                       tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
 
-                      print(f"\nProcessing {instance_id} ({state}, {current_type})")
-
-                      actual_snapshot_params = None
-
-                      if action == "scaledown":
-                          downsize_type = get_downsize_type()
-
-                          if current_type == downsize_type:
-                              print("Already at downsized type. Skipping.")
-                              continue
-
-                          preferred_type = (tags.get("PreferredInstanceType") or "").strip()
-                          if preferred_type:
-                              print(
-                                  "PreferredInstanceType tag already set to "
-                                  f"{preferred_type}. Preserving existing value and continuing with downsizing."
-                              )
-                          else:
-                              print(f"Tagging {instance_id} with PreferredInstanceType = {current_type}")
-                              ec2.create_tags(
-                                  Resources=[instance_id],
-                                  Tags=[{"Key": "PreferredInstanceType", "Value": current_type}]
-                              )
-                          desired_type = downsize_type
-
-                          try:
-                              pricing_filters, pricing_source = get_instance_pricing_profile(instance)
-                              print(
-                                  "Using pricing profile for "
-                                  f"{instance_id}: {pricing_filters} (source={pricing_source})"
-                              )
-                              original_rate = get_hourly_rate(current_type, pricing_filters)
-                              downsized_rate = get_hourly_rate(desired_type, pricing_filters)
-                              hourly_savings = max(original_rate - downsized_rate, 0)
-                              hourly_savings *= get_savings_plan_factor()
-                              record = {
-                                  "instance_id": instance_id,
-                                  "previous_type": current_type,
-                                  "downsized_type": desired_type,
-                                  "pricing_operating_system": pricing_filters["operatingSystem"],
-                                  "pricing_preinstalled_software": pricing_filters["preInstalledSw"],
-                                  "pricing_license_model": pricing_filters["licenseModel"],
-                                  "pricing_profile_source": pricing_source,
-                                  "hourly_savings": round(hourly_savings, 4),
-                                  "scale_down_timestamp": run_start_timestamp,
-                              }
-                              savings_records.append(record)
-                              ec2.create_tags(
-                                  Resources=[instance_id],
-                                  Tags=[
-                                      {
-                                          "Key": LAST_SCALE_DOWN_TIMESTAMP_TAG,
-                                          "Value": run_start_timestamp,
-                                      },
-                                      {
-                                          "Key": LAST_SCALE_DOWN_HOURLY_TAG,
-                                          "Value": f"{hourly_savings:.4f}",
-                                      },
-                                  ],
-                              )
-                              print(
-                                  "Recorded scale-down metadata for "
-                                  f"{instance_id}: timestamp={run_start_timestamp}, "
-                                  f"hourly_savings=${hourly_savings:.4f}"
-                              )
-                              print(
-                                  f"Estimated hourly savings for {instance_id}: ${hourly_savings:.4f}"
-                              )
-                          except Exception as pricing_error:
-                              print(
-                                  "Unable to calculate savings for "
-                                  f"{instance_id}: {pricing_error}"
-                              )
-
-                      elif action == "scaleup":
-                          desired_type = tags.get("PreferredInstanceType")
-                          if not desired_type:
-                              print("No PreferredInstanceType tag found. Skipping.")
-                              continue
-                          if current_type == desired_type:
-                              print("Already at desired type. Skipping.")
-                              continue
-
-                          actual_snapshot_params = {
-                              "instance_id": instance_id,
-                              "tags": tags,
-                              "desired_type": desired_type,
-                              "current_type": current_type,
-                          }
-
-                      if state != "stopped":
-                          print(f"Stopping {instance_id}...")
-                          ec2.stop_instances(InstanceIds=[instance_id])
-                          ec2.get_waiter("instance_stopped").wait(InstanceIds=[instance_id])
-                          print("Sleeping 10 seconds after stop...")
-                          time.sleep(10)
-
-                      print(f"Modifying {instance_id} to {desired_type}...")
-                      ec2.modify_instance_attribute(
-                          InstanceId=instance_id,
-                          InstanceType={"Value": desired_type}
-                      )
-                      print("Sleeping 10 seconds after modification...")
-                      time.sleep(10)
-                      print("Waiting before start...")
-                      time.sleep(10)
-
-                      for attempt in range(2):
-                          try:
-                              ec2.start_instances(InstanceIds=[instance_id])
-                              print(f"Start attempt {attempt + 1} succeeded for {instance_id}.")
-                              break
-                          except Exception as e:
-                              print(f"Start attempt {attempt + 1} failed: {e}")
-                              if attempt == 1:
-                                  raise
-                              time.sleep(10)
-
-                      for attempt in range(6):
-                          status = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0]["Instances"][0]["State"]["Name"]
-                          if status == "running":
-                              print(f"{instance_id} is running.")
-                              break
-                          print(f"{instance_id} still in state: {status}. Waiting...")
-                          time.sleep(15)
-                      else:
-                          raise Exception(f"{instance_id} did not reach 'running' state after 90 seconds.")
-
-                      if action == "scaleup" and actual_snapshot_params is not None:
-                          actual_result = build_actual_savings_snapshot(
-                              **actual_snapshot_params
+                      if not instance_matches_schedule(tags, schedule_name):
+                          skipped_due_to_schedule += 1
+                          print(
+                              f"Skipping {instance_id} because schedule tag did not match '{schedule_name}'."
                           )
-                          if actual_result:
-                              actual_snapshot, actual_snapshot_time = actual_result
-                              actual_savings_records.append(actual_snapshot)
+                          continue
 
-                              scale_up_timestamp_value = format_utc(actual_snapshot_time)
-                              ec2.create_tags(
-                                  Resources=[instance_id],
-                                  Tags=[
-                                      {
-                                          "Key": LAST_SCALE_UP_TIMESTAMP_TAG,
-                                          "Value": scale_up_timestamp_value,
-                                      }
-                                  ],
-                              )
-                              print(
-                                  f"Recorded scale-up metadata for {instance_id}: "
-                                  f"timestamp={scale_up_timestamp_value}"
-                              )
+                      instances_to_process.append(
+                          {
+                              "instance": instance,
+                              "instance_id": instance_id,
+                              "current_type": current_type,
+                              "state": state,
+                              "tags": tags,
+                          }
+                      )
+
+              if not instances_to_process:
+                  print(
+                      "No EC2 instances matched the requested schedule. Skipping workflow."
+                  )
+                  return {
+                      "processed_instances": 0,
+                      "action": action,
+                      "schedule": schedule_name,
+                      "skipped_instances": skipped_due_to_schedule,
+                  }
+
+              concurrency = get_concurrency_limit()
+              print(
+                  f"Processing {len(instances_to_process)} instances with concurrency={concurrency} "
+                  f"for schedule '{schedule_name}'."
+              )
+
+              downsize_type = get_downsize_type() if action == "scaledown" else None
+              savings_records = []
+              actual_savings_records = []
+              processed_count = 0
+
+              with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                  future_to_instance = {
+                      executor.submit(
+                          process_instance,
+                          instance_data,
+                          action,
+                          run_start_timestamp,
+                          downsize_type,
+                      ): instance_data["instance_id"]
+                      for instance_data in instances_to_process
+                  }
+
+                  for future in as_completed(future_to_instance):
+                      instance_id = future_to_instance[future]
+                      try:
+                          processed, savings_record, actual_record = future.result()
+                      except Exception as exc:
+                          print(f"Error processing {instance_id}: {exc}")
+                          raise
+
+                      if processed:
+                          processed_count += 1
+                      if savings_record:
+                          savings_records.append(savings_record)
+                      if actual_record:
+                          actual_savings_records.append(actual_record)
+
+              if skipped_due_to_schedule:
+                  print(
+                      f"Skipped {skipped_due_to_schedule} instance(s) due to schedule mismatch."
+                  )
 
               print("Lambda execution completed.")
 
@@ -1244,6 +1428,13 @@ Resources:
                   record_savings(savings_records)
               else:
                   record_actual_savings(actual_savings_records)
+
+              return {
+                  "processed_instances": processed_count,
+                  "action": action,
+                  "schedule": schedule_name,
+                  "skipped_instances": skipped_due_to_schedule,
+              }
 
   EC2ScalerScheduleDown:
     Type: AWS::Events::Rule
@@ -1256,7 +1447,7 @@ Resources:
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
           Id: DownTarget
-          Input: '{"action": "scaledown", "source": "eventbridge"}'
+          Input: '{"action": "scaledown", "source": "eventbridge", "schedule": "default"}'
 
   EC2ScalerScheduleUp:
     Type: AWS::Events::Rule
@@ -1269,7 +1460,7 @@ Resources:
       Targets:
         - Arn: !GetAtt EC2ScalerFunction.Arn
           Id: UpTarget
-          Input: '{"action": "scaleup", "source": "eventbridge"}'
+          Input: '{"action": "scaleup", "source": "eventbridge", "schedule": "default"}'
 
   SavingsLogBucket:
     Type: AWS::S3::Bucket
