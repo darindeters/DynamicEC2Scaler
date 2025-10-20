@@ -73,9 +73,11 @@ To test in the Lambda console:
 ```json
 {
   "source": "Scheduled",
-  "action": "scaleup"
+  "action": "scaleup",
+  "schedule": "default"
 }
 ```
+   - Replace `default` with another schedule name such as `business-hours` or `all` to target the corresponding set of tagged instances.
 
 ## 🚀 Suggested Future Enhancements
 
