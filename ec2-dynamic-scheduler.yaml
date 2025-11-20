@@ -190,35 +190,7 @@ Resources:
           SCHEDULE_ALL_TOKEN = "all"
 
           REGION_NAME_MAP = {
-              "af-south-1": "Africa (Cape Town)",
-              "ap-east-1": "Asia Pacific (Hong Kong)",
-              "ap-northeast-1": "Asia Pacific (Tokyo)",
-              "ap-northeast-2": "Asia Pacific (Seoul)",
-              "ap-northeast-3": "Asia Pacific (Osaka)",
-              "ap-south-1": "Asia Pacific (Mumbai)",
-              "ap-south-2": "Asia Pacific (Hyderabad)",
-              "ap-southeast-1": "Asia Pacific (Singapore)",
-              "ap-southeast-2": "Asia Pacific (Sydney)",
-              "ap-southeast-3": "Asia Pacific (Jakarta)",
-              "ap-southeast-4": "Asia Pacific (Melbourne)",
-              "ap-southeast-5": "Asia Pacific (Malaysia)",
-              "ca-central-1": "Canada (Central)",
-              "ca-west-1": "Canada West (Calgary)",
-              "eu-central-1": "EU (Frankfurt)",
-              "eu-central-2": "EU (Zurich)",
-              "eu-north-1": "EU (Stockholm)",
-              "eu-south-1": "EU (Milan)",
-              "eu-south-2": "EU (Spain)",
-              "eu-west-1": "EU (Ireland)",
-              "eu-west-2": "EU (London)",
-              "eu-west-3": "EU (Paris)",
-              "il-central-1": "Israel (Tel Aviv)",
-              "me-central-1": "Middle East (UAE)",
-              "me-south-1": "Middle East (Bahrain)",
-              "sa-east-1": "South America (São Paulo)",
-              "us-east-1": "US East (N. Virginia)",
               "us-east-2": "US East (Ohio)",
-              "us-west-1": "US West (N. California)",
               "us-west-2": "US West (Oregon)",
           }
 
@@ -1047,11 +1019,28 @@ Resources:
                   batch = metric_data[i : i + 20]
                   cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
 
-          def record_savings(savings_records):
+          def get_run_metadata():
               run_time = get_run_start_time() or datetime.datetime.utcnow()
               run_time = run_time.replace(microsecond=0)
-              timestamp = format_utc(run_time)
-              region = get_region()
+              return run_time, format_utc(run_time), get_region()
+
+          def write_savings_report(prefix, summary, run_time):
+              bucket = os.environ.get("SAVINGS_BUCKET")
+              if not bucket:
+                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
+
+              timestamp = summary.get("timestamp") or format_utc(run_time)
+              key = f"{prefix}/{run_time.date()}/{timestamp}.json"
+
+              print(f"Writing {prefix} report to s3://{bucket}/{key}")
+              s3.put_object(
+                  Bucket=bucket,
+                  Key=key,
+                  Body=json.dumps(summary, indent=2).encode("utf-8"),
+              )
+
+          def record_savings(savings_records):
+              run_time, timestamp, region = get_run_metadata()
               savings_plan_factor = get_savings_plan_factor()
               total_hourly_savings = round(
                   sum(r["hourly_savings"] for r in savings_records), 4
@@ -1094,25 +1083,13 @@ Resources:
               }
               print(json.dumps(log_event))
 
-              key = f"savings/{run_time.date()}/{timestamp}.json"
-              bucket = os.environ.get("SAVINGS_BUCKET")
-              if not bucket:
-                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
-              print(f"Writing savings report to s3://{bucket}/{key}")
-              s3.put_object(
-                  Bucket=bucket,
-                  Key=key,
-                  Body=json.dumps(summary, indent=2).encode("utf-8"),
-              )
+              write_savings_report("savings", summary, run_time)
 
               if savings_records:
                   publish_savings_metrics(summary, run_time)
 
           def record_actual_savings(actual_records):
-              run_time = get_run_start_time() or datetime.datetime.utcnow()
-              run_time = run_time.replace(microsecond=0)
-              timestamp = format_utc(run_time)
-              region = get_region()
+              run_time, timestamp, region = get_run_metadata()
 
               total_actual_savings = round(
                   sum(record.get("actual_savings", 0.0) for record in actual_records),
@@ -1149,16 +1126,7 @@ Resources:
               }
               print(json.dumps(log_event))
 
-              key = f"actual-savings/{run_time.date()}/{timestamp}.json"
-              bucket = os.environ.get("SAVINGS_BUCKET")
-              if not bucket:
-                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
-              print(f"Writing actual savings report to s3://{bucket}/{key}")
-              s3.put_object(
-                  Bucket=bucket,
-                  Key=key,
-                  Body=json.dumps(summary, indent=2).encode("utf-8"),
-              )
+              write_savings_report("actual-savings", summary, run_time)
 
               if actual_records:
                   publish_actual_savings_metrics(summary, run_time)
