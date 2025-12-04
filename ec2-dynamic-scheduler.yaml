@@ -309,6 +309,14 @@ Resources:
               key = raw_key.strip()
               return key or "DynamicScalingSchedule"
 
+          def get_tag_value(tags, key):
+              if key in tags:
+                  return tags[key]
+              for tag_key, value in tags.items():
+                  if tag_key.lower() == key.lower():
+                      return value
+              return None
+
           def normalize_schedule_name(value):
               if value is None:
                   return DEFAULT_SCHEDULE_NAME
@@ -331,7 +339,7 @@ Resources:
               if schedule_name == SCHEDULE_ALL_TOKEN:
                   return True
               schedule_tag_key = get_schedule_tag_key()
-              raw_value = tags.get(schedule_tag_key)
+              raw_value = get_tag_value(tags, schedule_tag_key)
               if not raw_value:
                   return schedule_name == DEFAULT_SCHEDULE_NAME
               values = parse_schedule_tag_value(raw_value)
@@ -1108,7 +1116,11 @@ Resources:
           def write_savings_report(prefix, summary, run_time):
               bucket = os.environ.get("SAVINGS_BUCKET")
               if not bucket:
-                  raise ValueError("SAVINGS_BUCKET environment variable is not set")
+                  print(
+                      "SAVINGS_BUCKET environment variable is not set; skipping "
+                      f"{prefix} report write."
+                  )
+                  return None
 
               timestamp = summary.get("timestamp") or format_utc(run_time)
               key = f"{prefix}/{run_time.date()}/{timestamp}.json"
@@ -1410,6 +1422,7 @@ Resources:
 
               instances_to_process = []
               skipped_due_to_schedule = 0
+              seen_instance_ids = set()
 
               for reservation in reservations:
                   for instance in reservation.get("Instances", []):
@@ -1417,6 +1430,13 @@ Resources:
                       current_type = instance.get("InstanceType")
                       state = (instance.get("State") or {}).get("Name", "unknown")
                       tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
+
+                      if instance_id in seen_instance_ids:
+                          print(
+                              f"Skipping duplicate entry for {instance_id}; already queued in this run."
+                          )
+                          continue
+                      seen_instance_ids.add(instance_id)
 
                       if not instance_matches_schedule(tags, schedule_name):
                           skipped_due_to_schedule += 1
