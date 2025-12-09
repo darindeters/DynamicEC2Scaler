@@ -7,7 +7,7 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 
 - A Lambda function runs on EventBridge schedules:
   - **Default schedule** — Scales down at 7 PM Pacific (Standard Time) via `cron(0 3 ? * TUE-SAT *)` and scales up at 4 AM Pacific via `cron(0 12 ? * MON-FRI *)`. Switch to the Daylight Saving Time equivalents or update the stack parameters for other timezones.
-  - **Business-hours schedule** — Scales down at 6 PM Pacific via `cron(0 2 ? * TUE-SAT *)` and scales up at 9 AM Pacific via `cron(0 17 ? * MON-FRI *)`. Assign instances with the `DynamicScalingSchedule=business-hours` tag value to use it.
+  - **Business-hours schedule** — Scales down at 6 PM Pacific via `cron(0 2 ? * TUE-SAT *)` and scales up at 9 AM Pacific via `cron(0 17 ? * MON-FRI *)`. Opt instances into this schedule by tagging them with `DynamicScalingSchedule=business-hours` (or with your custom schedule tag key set to the `business-hours` value).
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
@@ -31,6 +31,8 @@ Apply these tags to any EC2 instance you want managed by this scheduler:
 | Tag Key                  | Example Value      | Purpose                                                                 |
 |--------------------------|--------------------|-------------------------------------------------------------------------|
 | `DynamicScalingSchedule` | `default`, `business-hours`, `all`   | Assigns the instance to an alternate schedule. Comma-separated values allow an instance to opt into multiple schedules; instances without this tag use the default schedule. |
+
+> For the business-hours schedule, set the schedule tag key (defaults to `DynamicScalingSchedule`) to the value `business-hours` on each instance you want on that timetable.
 
 ## 🔐 IAM Permissions
 
