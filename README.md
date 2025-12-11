@@ -44,6 +44,15 @@ The Lambda function follows a least privilege model. It can only modify EC2 inst
 - Write savings reports to an S3 bucket created by the stack
 - Query Cost Explorer Savings Plan coverage metrics when coverage-based discounts are enabled
 
+## 🛡️ Resiliency and Error Handling
+
+- **Configurable retries:** AWS API interactions such as stop/modify/start, tag writes, and waiter checks flow through a `retry` helper with bounded attempts and backoff to absorb transient throttling before surfacing an error.
+- **Input validation:** The Lambda enforces supported `action` values and blocks manual runs to avoid unexpected invocation paths.
+- **Safe metric emission:** Savings metrics are skipped entirely when no namespace is configured, and each CloudWatch publication batch is wrapped with ClientError/exception logging so a metrics outage does not stop the run.
+- **S3 write guards:** Savings reports log and continue when the target bucket is unset or when `put_object` raises an error, preventing upload failures from crashing the function.
+- **Defensive savings math:** Actual savings snapshots verify required tags, parse timestamps defensively, and skip instances with invalid or missing metadata instead of raising.
+- **EC2 discovery fallback:** If `DescribeInstances` fails, the handler returns a structured error response and halts gracefully rather than crashing mid-run.
+
 ## 📦 Deployment
 
 You can deploy this stack using the AWS Console, AWS CLI, or SAM/CDK.

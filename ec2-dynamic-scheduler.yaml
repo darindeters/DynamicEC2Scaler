@@ -965,7 +965,18 @@ Resources:
 
               for i in range(0, len(metric_data), 20):
                   batch = metric_data[i : i + 20]
-                  cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+                  try:
+                      cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+                  except ClientError as metric_error:
+                      print(
+                          "Failed to publish savings metrics batch to CloudWatch: "
+                          f"{metric_error}"
+                      )
+                  except Exception as metric_error:
+                      print(
+                          "Unexpected error while publishing savings metrics batch: "
+                          f"{metric_error}"
+                      )
 
           def build_actual_savings_snapshot(instance_id, tags, desired_type, current_type):
               last_down_value = tags.get(LAST_SCALE_DOWN_TIMESTAMP_TAG)
@@ -1106,7 +1117,18 @@ Resources:
 
               for i in range(0, len(metric_data), 20):
                   batch = metric_data[i : i + 20]
-                  cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+                  try:
+                      cloudwatch.put_metric_data(Namespace=namespace, MetricData=batch)
+                  except ClientError as metric_error:
+                      print(
+                          "Failed to publish actual savings metrics batch to CloudWatch: "
+                          f"{metric_error}"
+                      )
+                  except Exception as metric_error:
+                      print(
+                          "Unexpected error while publishing actual savings metrics batch: "
+                          f"{metric_error}"
+                      )
 
           def get_run_metadata():
               run_time = get_run_start_time() or datetime.datetime.utcnow()
@@ -1126,11 +1148,22 @@ Resources:
               key = f"{prefix}/{run_time.date()}/{timestamp}.json"
 
               print(f"Writing {prefix} report to s3://{bucket}/{key}")
-              s3.put_object(
-                  Bucket=bucket,
-                  Key=key,
-                  Body=json.dumps(summary, indent=2).encode("utf-8"),
-              )
+              try:
+                  s3.put_object(
+                      Bucket=bucket,
+                      Key=key,
+                      Body=json.dumps(summary, indent=2).encode("utf-8"),
+                  )
+              except ClientError as s3_error:
+                  print(
+                      "Failed to write savings report to S3: "
+                      f"{s3_error}"
+                  )
+              except Exception as s3_error:
+                  print(
+                      "Unexpected error while writing savings report to S3: "
+                      f"{s3_error}"
+                  )
 
           def record_savings(savings_records):
               run_time, timestamp, region = get_run_metadata()
@@ -1405,8 +1438,21 @@ Resources:
 
               reservations = []
               paginator = ec2_client.get_paginator("describe_instances")
-              for page in paginator.paginate(Filters=filters):
-                  reservations.extend(page.get("Reservations", []))
+              try:
+                  for page in paginator.paginate(Filters=filters):
+                      reservations.extend(page.get("Reservations", []))
+              except ClientError as describe_error:
+                  print(
+                      "Unable to describe instances for scaling run: "
+                      f"{describe_error}"
+                  )
+                  return {
+                      "processed_instances": 0,
+                      "action": action,
+                      "schedule": schedule_name,
+                      "skipped_instances": 0,
+                      "error": "describe_instances_failed",
+                  }
 
               if not reservations:
                   print(
