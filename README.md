@@ -6,8 +6,8 @@ This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize co
 ## 🔧 How It Works
 
 - A Lambda function runs on EventBridge schedules:
-  - **Default schedule** — Scales down at 7 PM Pacific (Standard Time) via `cron(0 3 ? * TUE-SAT *)` and scales up at 4 AM Pacific via `cron(0 12 ? * MON-FRI *)`. Switch to the Daylight Saving Time equivalents or update the stack parameters for other timezones.
-  - **Business-hours schedule** — Scales down at 6 PM Pacific via `cron(0 2 ? * TUE-SAT *)` and scales up at 9 AM Pacific via `cron(0 17 ? * MON-FRI *)`. Opt instances into this schedule by tagging them with `DynamicScalingSchedule=business-hours` (or with your custom schedule tag key set to the `business-hours` value).
+- **Default schedule** — Scales down at 2 PM Pacific (10 PM UTC) via `cron(0 22 ? * MON-FRI *)` and scales up at 9 AM Pacific (5 PM UTC) via `cron(0 17 ? * MON-FRI *)`. Switch to the Daylight Saving Time equivalents or update the stack parameters for other timezones. If you need a post-midnight scale-down, convert the weekday tokens to `TUE-SAT` so the rule fires on the intended calendar days.
+  - **Business-hours schedule** — Scales down at 6 PM Pacific (2 AM UTC) via `cron(0 2 ? * TUE-SAT *)` and scales up at 9 AM Pacific (5 PM UTC) via `cron(0 17 ? * MON-FRI *)`. Opt instances into this schedule by tagging them with `DynamicScalingSchedule=business-hours` (or with your custom schedule tag key set to the `business-hours` value).
 - Instances are rebooted once per resize operation (stop → modify → start)
 - This works even if you're using Compute Savings Plans
 - Minimal impact to existing tools, monitoring agents, or workflows
