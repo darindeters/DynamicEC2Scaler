@@ -93,6 +93,13 @@ Parameters:
     Type: String
     Default: NA
     Description: Default pre-installed software filter to use for pricing lookups when an instance platform cannot be detected.
+  SavingsLogBucket:
+    Type: String
+    Default: ""
+    Description: Optional custom bucket name for storing savings and actuals logs (leave blank to auto-generate).
+
+Conditions:
+  HasCustomSavingsLogBucket: !Not [!Equals [!Ref SavingsLogBucket, ""]]
 
 Resources:
 
@@ -141,7 +148,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Sub "arn:${AWS::Partition}:s3:::${SavingsLogBucket}/*"
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${SavingsLogBucketResource}/*"
               - Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
@@ -169,7 +176,7 @@ Resources:
           MAX_RETRIES: !Ref MaxRetries
           BACKOFF_SECS: !Ref BackoffSeconds
           FAIL_FAST: !Ref FailFast
-          SAVINGS_BUCKET: !Ref SavingsLogBucket
+          SAVINGS_BUCKET: !Ref SavingsLogBucketResource
           SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
           SAVINGS_PLAN_DISCOUNT_MODE: !Ref SavingsPlanDiscountMode
           SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS: !Ref SavingsPlanCoverageLookbackDays
@@ -1642,8 +1649,10 @@ Resources:
           Id: BusinessHoursUpTarget
           Input: '{"action": "scaleup", "source": "eventbridge", "schedule": "business-hours"}'
 
-  SavingsLogBucket:
+  SavingsLogBucketResource:
     Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [HasCustomSavingsLogBucket, !Ref SavingsLogBucket, !Ref AWS::NoValue]
 
   LambdaInvokePermissionDown:
     Type: AWS::Lambda::Permission
