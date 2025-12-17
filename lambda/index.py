@@ -458,19 +458,27 @@ PLATFORM_FILTER_RULES = [
 ]
 
 def get_region():
-    region_name = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    region_name = (
+        session.region_name
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+    )
     if not region_name:
-        raise ValueError("AWS region could not be determined for pricing lookup")
+        print(
+            "AWS region could not be determined for pricing lookup. "
+            "Defaulting to 'unknown'."
+        )
+        return "unknown"
     return region_name
 
 def get_location(region_name):
     location = REGION_NAME_MAP.get(region_name)
     if not location:
-        supported_regions = ", ".join(sorted(REGION_NAME_MAP))
-        raise ValueError(
+        print(
             "Unsupported region for pricing lookup: "
-            f"{region_name}. Supported regions: {supported_regions}"
+            f"{region_name}. Defaulting location to 'Unknown'."
         )
+        return "Unknown"
     return location
 
 def build_pricing_cache_key(instance_type, pricing_filters):
@@ -507,6 +515,12 @@ def get_hourly_rate(instance_type, pricing_filters):
 
     region_name = get_region()
     location = get_location(region_name)
+    if region_name == "unknown" or location == "Unknown":
+        print(
+            "Pricing lookup skipped because region or location could not be determined. "
+            "Defaulting hourly rate to $0.0."
+        )
+        return 0.0
     pricing_client = get_pricing_client()
 
     def build_filters():
@@ -1247,7 +1261,7 @@ def process_instance(instance_data, action, run_start_timestamp, downsize_type=N
 
     return True, savings_record, actual_record
 
-def lambda_handler(event, context):
+def lambda_handler(event, _context):
     action = event.get("action")
     source = event.get("source", "manual")
     schedule_name = normalize_schedule_name(event.get("schedule"))

@@ -76,28 +76,6 @@ variable "savings_metric_namespace" {
   default     = "DynamicEC2Scaler/Savings"
 }
 
-variable "savings_plan_discount_percent" {
-  description = "Percentage discount applied to On-Demand rates by an account-wide Compute Savings Plan"
-  type        = number
-  default     = 0
-}
-
-variable "savings_plan_discount_mode" {
-  description = "Controls how Savings Plan discounts are applied"
-  type        = string
-  default     = "Manual"
-  validation {
-    condition     = contains(["Manual", "Coverage"], var.savings_plan_discount_mode)
-    error_message = "savings_plan_discount_mode must be either Manual or Coverage"
-  }
-}
-
-variable "savings_plan_coverage_lookback_days" {
-  description = "Lookback window (in days) to use when deriving Savings Plan coverage data from Cost Explorer"
-  type        = number
-  default     = 30
-}
-
 variable "default_pricing_operating_system" {
   description = "Default operating system filter to use for pricing lookups when an instance platform cannot be detected"
   type        = string
