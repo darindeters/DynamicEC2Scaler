@@ -57,25 +57,6 @@ Parameters:
     Type: String
     Default: "DynamicEC2Scaler/Savings"
     Description: CloudWatch metric namespace to use when publishing savings data.
-  SavingsPlanDiscountPercent:
-    Type: Number
-    Default: 0
-    MinValue: 0
-    MaxValue: 100
-    Description: Percentage discount applied to On-Demand rates by an account-wide Compute Savings Plan (0-100).
-  SavingsPlanDiscountMode:
-    Type: String
-    Default: Manual
-    AllowedValues:
-      - Manual
-      - Coverage
-    Description: Controls how Savings Plan discounts are applied (Manual uses the provided percentage, Coverage derives an effective rate from Cost Explorer).
-  SavingsPlanCoverageLookbackDays:
-    Type: Number
-    Default: 30
-    MinValue: 1
-    MaxValue: 90
-    Description: Lookback window (in days) to use when deriving Savings Plan coverage data from Cost Explorer.
   DefaultPricingOperatingSystem:
     Type: String
     Default: Linux
@@ -180,9 +161,6 @@ Resources:
           BACKOFF_SECS: !Ref BackoffSeconds
           FAIL_FAST: !Ref FailFast
           SAVINGS_BUCKET: !Ref SavingsLogBucketResource
-          SAVINGS_PLAN_DISCOUNT_PERCENT: !Ref SavingsPlanDiscountPercent
-          SAVINGS_PLAN_DISCOUNT_MODE: !Ref SavingsPlanDiscountMode
-          SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS: !Ref SavingsPlanCoverageLookbackDays
           SAVINGS_METRIC_NAMESPACE: !Ref SavingsMetricNamespace
           DEFAULT_PRICING_OPERATING_SYSTEM: !Ref DefaultPricingOperatingSystem
           DEFAULT_PRICING_LICENSE_MODEL: !Ref DefaultPricingLicenseModel

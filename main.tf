@@ -108,9 +108,6 @@ resource "aws_lambda_function" "ec2_scaler" {
       BACKOFF_SECS                            = var.backoff_seconds
       FAIL_FAST                               = tostring(var.fail_fast)
       SAVINGS_BUCKET                          = aws_s3_bucket.savings_log.bucket
-      SAVINGS_PLAN_DISCOUNT_PERCENT           = var.savings_plan_discount_percent
-      SAVINGS_PLAN_DISCOUNT_MODE              = var.savings_plan_discount_mode
-      SAVINGS_PLAN_COVERAGE_LOOKBACK_DAYS     = var.savings_plan_coverage_lookback_days
       SAVINGS_METRIC_NAMESPACE                = var.savings_metric_namespace
       DEFAULT_PRICING_OPERATING_SYSTEM        = var.default_pricing_operating_system
       DEFAULT_PRICING_LICENSE_MODEL           = var.default_pricing_license_model
