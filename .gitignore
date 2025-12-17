@@ -1,0 +1,11 @@
+# Terraform artifacts
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+*.zip
+
+# Python cache
+__pycache__/
+*.pyc

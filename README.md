@@ -57,6 +57,17 @@ The Lambda function follows a least privilege model. It can only modify EC2 inst
 
 You can deploy this stack using the AWS Console, AWS CLI, or SAM/CDK.
 
+### Terraform
+
+1. Ensure your AWS credentials and default region are configured in your environment.
+2. From the repository root, run:
+   ```bash
+   terraform init
+   terraform apply
+   ```
+   Override any of the stack parameters via `-var` flags (for example, `-var "lambda_schedule_up_time=cron(0 17 ? * MON-FRI *)"`).
+3. Apply the required tags to your EC2 instances (see below) after the deployment completes.
+
 To deploy with AWS Console:
 
 1. Download the CloudFormation template: [`ec2-dynamic-scheduler.yaml`](./ec2-dynamic-scheduler.yaml)
