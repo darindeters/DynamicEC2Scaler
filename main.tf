@@ -154,28 +154,44 @@ resource "aws_cloudwatch_event_target" "default_down" {
   rule      = aws_cloudwatch_event_rule.default_down.name
   target_id = "DownTarget"
   arn       = aws_lambda_function.ec2_scaler.arn
-  input     = '{"action": "scaledown", "source": "eventbridge", "schedule": "default"}'
+  input = jsonencode({
+    action   = "scaledown"
+    source   = "eventbridge"
+    schedule = "default"
+  })
 }
 
 resource "aws_cloudwatch_event_target" "default_up" {
   rule      = aws_cloudwatch_event_rule.default_up.name
   target_id = "UpTarget"
   arn       = aws_lambda_function.ec2_scaler.arn
-  input     = '{"action": "scaleup", "source": "eventbridge", "schedule": "default"}'
+  input = jsonencode({
+    action   = "scaleup"
+    source   = "eventbridge"
+    schedule = "default"
+  })
 }
 
 resource "aws_cloudwatch_event_target" "business_down" {
   rule      = aws_cloudwatch_event_rule.business_down.name
   target_id = "BusinessHoursDownTarget"
   arn       = aws_lambda_function.ec2_scaler.arn
-  input     = '{"action": "scaledown", "source": "eventbridge", "schedule": "business-hours"}'
+  input = jsonencode({
+    action   = "scaledown"
+    source   = "eventbridge"
+    schedule = "business-hours"
+  })
 }
 
 resource "aws_cloudwatch_event_target" "business_up" {
   rule      = aws_cloudwatch_event_rule.business_up.name
   target_id = "BusinessHoursUpTarget"
   arn       = aws_lambda_function.ec2_scaler.arn
-  input     = '{"action": "scaleup", "source": "eventbridge", "schedule": "business-hours"}'
+  input = jsonencode({
+    action   = "scaleup"
+    source   = "eventbridge"
+    schedule = "business-hours"
+  })
 }
 
 resource "aws_lambda_permission" "default_down" {
