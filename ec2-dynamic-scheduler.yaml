@@ -178,6 +178,7 @@ Resources:
           import threading
           import time
           from concurrent.futures import ThreadPoolExecutor, as_completed
+          from functools import lru_cache
           from itertools import islice
           from botocore.exceptions import ClientError
 
@@ -188,9 +189,6 @@ Resources:
           _thread_local = threading.local()
           PRICE_CACHE = {}
           PRICE_CACHE_LOCK = threading.Lock()
-          SAVINGS_PLAN_FACTOR = None
-          SAVINGS_PLAN_FACTOR_SOURCE = None
-          SAVINGS_PLAN_LOCK = threading.Lock()
           DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
           VALID_ACTIONS = {"scaleup", "scaledown"}
           RUN_CONTEXT = {}
@@ -857,29 +855,30 @@ Resources:
               )
               return 1 - (discount_percent / 100.0)
 
+          @lru_cache(maxsize=1)
           def get_savings_plan_factor():
-              global SAVINGS_PLAN_FACTOR
-              global SAVINGS_PLAN_FACTOR_SOURCE
-              with SAVINGS_PLAN_LOCK:
-                  if SAVINGS_PLAN_FACTOR is not None:
-                      return SAVINGS_PLAN_FACTOR
+              """
+              Return both the numeric Savings Plan adjustment and the source used to derive it.
 
-                  mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
+              We keep the source alongside the factor so operational logs, S3 reports, and
+              CloudWatch metrics can show whether the discount was derived from manual
+              configuration or Cost Explorer coverage. That context helps explain sudden
+              swings in reported savings without relying on external state.
+              """
+              mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
 
-                  if mode == "coverage":
-                      try:
-                          SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
-                          SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
-                          return SAVINGS_PLAN_FACTOR
-                      except Exception as coverage_error:
-                          print(
-                              "Falling back to manual Savings Plan discount due to coverage error: "
-                              f"{coverage_error}"
-                          )
+              if mode == "coverage":
+                  try:
+                      factor = get_coverage_discount_factor()
+                      return factor, "coverage"
+                  except Exception as coverage_error:
+                      print(
+                          "Falling back to manual Savings Plan discount due to coverage error: "
+                          f"{coverage_error}"
+                      )
 
-                  SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
-                  SAVINGS_PLAN_FACTOR_SOURCE = "manual"
-                  return SAVINGS_PLAN_FACTOR
+              factor = get_manual_discount_factor()
+              return factor, "manual"
 
           def get_metric_namespace():
               raw_value = os.environ.get("SAVINGS_METRIC_NAMESPACE")
@@ -1164,7 +1163,7 @@ Resources:
 
           def record_savings(savings_records):
               run_time, timestamp, region = get_run_metadata()
-              savings_plan_factor = get_savings_plan_factor()
+              savings_plan_factor, savings_plan_source = get_savings_plan_factor()
               total_hourly_savings = round(
                   sum(r["hourly_savings"] for r in savings_records), 4
               ) if savings_records else 0.0
@@ -1175,7 +1174,7 @@ Resources:
                   "savings_plan_discount_percent": round(
                       (1 - savings_plan_factor) * 100, 4
                   ),
-                  "savings_plan_discount_source": SAVINGS_PLAN_FACTOR_SOURCE,
+                  "savings_plan_discount_source": savings_plan_source,
                   "total_hourly_savings": total_hourly_savings,
                   "instances": savings_records,
               }
@@ -1298,7 +1297,8 @@ Resources:
                       original_rate = get_hourly_rate(current_type, pricing_filters)
                       downsized_rate = get_hourly_rate(desired_type, pricing_filters)
                       hourly_savings = max(original_rate - downsized_rate, 0)
-                      hourly_savings *= get_savings_plan_factor()
+                      savings_plan_factor, _ = get_savings_plan_factor()
+                      hourly_savings *= savings_plan_factor
                       record = {
                           "instance_id": instance_id,
                           "previous_type": current_type,

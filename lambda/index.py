@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from itertools import islice
 from botocore.exceptions import ClientError
 
@@ -15,9 +16,6 @@ cost_explorer = session.client("ce", region_name="us-east-1")
 _thread_local = threading.local()
 PRICE_CACHE = {}
 PRICE_CACHE_LOCK = threading.Lock()
-SAVINGS_PLAN_FACTOR = None
-SAVINGS_PLAN_FACTOR_SOURCE = None
-SAVINGS_PLAN_LOCK = threading.Lock()
 DEFAULT_METRIC_NAMESPACE = "DynamicEC2Scaler/Savings"
 VALID_ACTIONS = {"scaleup", "scaledown"}
 RUN_CONTEXT = {}
@@ -29,28 +27,7 @@ DEFAULT_SCHEDULE_NAME = "default"
 SCHEDULE_ALL_TOKEN = "all"
 
 REGION_NAME_MAP = {
-    "ap-northeast-1": "Asia Pacific (Tokyo)",
-    "ap-northeast-2": "Asia Pacific (Seoul)",
-    "ap-northeast-3": "Asia Pacific (Osaka)",
-    "ap-south-1": "Asia Pacific (Mumbai)",
-    "ap-south-2": "Asia Pacific (Hyderabad)",
-    "ap-southeast-1": "Asia Pacific (Singapore)",
-    "ap-southeast-2": "Asia Pacific (Sydney)",
-    "ap-southeast-3": "Asia Pacific (Jakarta)",
-    "ap-southeast-4": "Asia Pacific (Melbourne)",
-    "ca-central-1": "Canada (Central)",
-    "eu-central-1": "EU (Frankfurt)",
-    "eu-north-1": "EU (Stockholm)",
-    "eu-south-1": "EU (Milan)",
-    "eu-south-2": "EU (Spain)",
-    "eu-west-1": "EU (Ireland)",
-    "eu-west-2": "EU (London)",
-    "eu-west-3": "EU (Paris)",
-    "me-south-1": "Middle East (Bahrain)",
-    "sa-east-1": "South America (São Paulo)",
-    "us-east-1": "US East (N. Virginia)",
     "us-east-2": "US East (Ohio)",
-    "us-west-1": "US West (N. California)",
     "us-west-2": "US West (Oregon)",
 }
 
@@ -458,27 +435,19 @@ PLATFORM_FILTER_RULES = [
 ]
 
 def get_region():
-    region_name = (
-        session.region_name
-        or os.environ.get("AWS_REGION")
-        or os.environ.get("AWS_DEFAULT_REGION")
-    )
+    region_name = session.region_name or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region_name:
-        print(
-            "AWS region could not be determined for pricing lookup. "
-            "Defaulting to 'unknown'."
-        )
-        return "unknown"
+        raise ValueError("AWS region could not be determined for pricing lookup")
     return region_name
 
 def get_location(region_name):
     location = REGION_NAME_MAP.get(region_name)
     if not location:
-        print(
+        supported_regions = ", ".join(sorted(REGION_NAME_MAP))
+        raise ValueError(
             "Unsupported region for pricing lookup: "
-            f"{region_name}. Defaulting location to 'Unknown'."
+            f"{region_name}. Supported regions: {supported_regions}"
         )
-        return "Unknown"
     return location
 
 def build_pricing_cache_key(instance_type, pricing_filters):
@@ -515,12 +484,6 @@ def get_hourly_rate(instance_type, pricing_filters):
 
     region_name = get_region()
     location = get_location(region_name)
-    if region_name == "unknown" or location == "Unknown":
-        print(
-            "Pricing lookup skipped because region or location could not be determined. "
-            "Defaulting hourly rate to $0.0."
-        )
-        return 0.0
     pricing_client = get_pricing_client()
 
     def build_filters():
@@ -719,29 +682,30 @@ def get_coverage_discount_factor():
     )
     return 1 - (discount_percent / 100.0)
 
+@lru_cache(maxsize=1)
 def get_savings_plan_factor():
-    global SAVINGS_PLAN_FACTOR
-    global SAVINGS_PLAN_FACTOR_SOURCE
-    with SAVINGS_PLAN_LOCK:
-        if SAVINGS_PLAN_FACTOR is not None:
-            return SAVINGS_PLAN_FACTOR
+    """
+    Return both the numeric Savings Plan adjustment and the source used to derive it.
 
-        mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
+    We keep the source alongside the factor so operational logs, S3 reports, and
+    CloudWatch metrics can show whether the discount was derived from manual
+    configuration or Cost Explorer coverage. That context helps explain sudden
+    swings in reported savings without relying on external state.
+    """
+    mode = os.environ.get("SAVINGS_PLAN_DISCOUNT_MODE", "Manual").strip().lower()
 
-        if mode == "coverage":
-            try:
-                SAVINGS_PLAN_FACTOR = get_coverage_discount_factor()
-                SAVINGS_PLAN_FACTOR_SOURCE = "coverage"
-                return SAVINGS_PLAN_FACTOR
-            except Exception as coverage_error:
-                print(
-                    "Falling back to manual Savings Plan discount due to coverage error: "
-                    f"{coverage_error}"
-                )
+    if mode == "coverage":
+        try:
+            factor = get_coverage_discount_factor()
+            return factor, "coverage"
+        except Exception as coverage_error:
+            print(
+                "Falling back to manual Savings Plan discount due to coverage error: "
+                f"{coverage_error}"
+            )
 
-        SAVINGS_PLAN_FACTOR = get_manual_discount_factor()
-        SAVINGS_PLAN_FACTOR_SOURCE = "manual"
-        return SAVINGS_PLAN_FACTOR
+    factor = get_manual_discount_factor()
+    return factor, "manual"
 
 def get_metric_namespace():
     raw_value = os.environ.get("SAVINGS_METRIC_NAMESPACE")
@@ -983,7 +947,16 @@ def publish_actual_savings_metrics(report, timestamp):
 def get_run_metadata():
     run_time = get_run_start_time() or datetime.datetime.utcnow()
     run_time = run_time.replace(microsecond=0)
-    return run_time, format_utc(run_time), get_region()
+    try:
+        region = get_region()
+    except Exception as region_error:
+        print(
+            "Unable to determine region for savings reporting: "
+            f"{region_error}. Using 'unknown'."
+        )
+        region = "unknown"
+
+    return run_time, format_utc(run_time), region
 
 def write_savings_report(prefix, summary, run_time):
     bucket = os.environ.get("SAVINGS_BUCKET")
@@ -1017,7 +990,7 @@ def write_savings_report(prefix, summary, run_time):
 
 def record_savings(savings_records):
     run_time, timestamp, region = get_run_metadata()
-    savings_plan_factor = get_savings_plan_factor()
+    savings_plan_factor, savings_plan_source = get_savings_plan_factor()
     total_hourly_savings = round(
         sum(r["hourly_savings"] for r in savings_records), 4
     ) if savings_records else 0.0
@@ -1028,7 +1001,7 @@ def record_savings(savings_records):
         "savings_plan_discount_percent": round(
             (1 - savings_plan_factor) * 100, 4
         ),
-        "savings_plan_discount_source": SAVINGS_PLAN_FACTOR_SOURCE,
+        "savings_plan_discount_source": savings_plan_source,
         "total_hourly_savings": total_hourly_savings,
         "instances": savings_records,
     }
@@ -1151,7 +1124,8 @@ def process_instance(instance_data, action, run_start_timestamp, downsize_type=N
             original_rate = get_hourly_rate(current_type, pricing_filters)
             downsized_rate = get_hourly_rate(desired_type, pricing_filters)
             hourly_savings = max(original_rate - downsized_rate, 0)
-            hourly_savings *= get_savings_plan_factor()
+            savings_plan_factor, _ = get_savings_plan_factor()
+            hourly_savings *= savings_plan_factor
             record = {
                 "instance_id": instance_id,
                 "previous_type": current_type,
@@ -1261,7 +1235,7 @@ def process_instance(instance_data, action, run_start_timestamp, downsize_type=N
 
     return True, savings_record, actual_record
 
-def lambda_handler(event, _context):
+def lambda_handler(event, context):
     action = event.get("action")
     source = event.get("source", "manual")
     schedule_name = normalize_schedule_name(event.get("schedule"))
