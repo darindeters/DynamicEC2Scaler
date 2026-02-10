@@ -149,6 +149,17 @@ def normalize_environment_category(value):
         return ""
     return normalized
 
+
+def normalize_app_name(value):
+    if value is None:
+        return ""
+    normalized = str(value).strip()
+    if not normalized:
+        return ""
+    if normalized.lower() == "all":
+        return ""
+    return normalized
+
 def parse_schedule_tag_value(raw_value):
     if not raw_value:
         return []
@@ -186,6 +197,17 @@ def instance_matches_environment_category(tags, environment_category):
         str(instance_environment_category).strip().lower()
         == environment_category.lower()
     )
+
+
+def instance_matches_app_name(tags, app_name):
+    if not app_name:
+        return True
+
+    instance_app_name = get_tag_value(tags, "appName")
+    if instance_app_name is None:
+        return False
+
+    return str(instance_app_name).strip().lower() == app_name.lower()
 
 def get_concurrency_limit():
     raw_value = os.environ.get("MAX_CONCURRENT_OPERATIONS")
@@ -1267,6 +1289,7 @@ def lambda_handler(event, context):
     environment_category = normalize_environment_category(
         event.get("environmentCategory")
     )
+    app_name = normalize_app_name(event.get("appName") or event.get("app_name"))
 
     if action not in VALID_ACTIONS:
         raise ValueError(f"Invalid or missing 'action'. Must be one of: {VALID_ACTIONS}")
@@ -1280,7 +1303,8 @@ def lambda_handler(event, context):
 
     print(
         f"Starting EC2 {action} process for schedule '{schedule_name}'"
-        f" environmentCategory='{environment_category or 'all'}'..."
+        f" environmentCategory='{environment_category or 'all'}'"
+        f" appName='{app_name or 'all'}'..."
     )
 
     ec2_client = get_ec2_client()
@@ -1304,6 +1328,7 @@ def lambda_handler(event, context):
             "action": action,
             "schedule": schedule_name,
             "environment_category": environment_category or "all",
+            "app_name": app_name or "all",
             "skipped_instances": 0,
             "error": "describe_instances_failed",
         }
@@ -1318,6 +1343,7 @@ def lambda_handler(event, context):
             "action": action,
             "schedule": schedule_name,
             "environment_category": environment_category or "all",
+            "app_name": app_name or "all",
             "skipped_instances": 0,
         }
 
@@ -1353,6 +1379,13 @@ def lambda_handler(event, context):
                 )
                 continue
 
+            if not instance_matches_app_name(tags, app_name):
+                skipped_due_to_schedule += 1
+                print(
+                    f"Skipping {instance_id} because appName tag did not match '{app_name}'."
+                )
+                continue
+
             instances_to_process.append(
                 {
                     "instance": instance,
@@ -1365,13 +1398,14 @@ def lambda_handler(event, context):
 
     if not instances_to_process:
         print(
-            "No EC2 instances matched the requested schedule/environmentCategory filter. Skipping workflow."
+            "No EC2 instances matched the requested schedule/environmentCategory/appName filter. Skipping workflow."
         )
         return {
             "processed_instances": 0,
             "action": action,
             "schedule": schedule_name,
             "environment_category": environment_category or "all",
+            "app_name": app_name or "all",
             "skipped_instances": skipped_due_to_schedule,
         }
 
@@ -1380,7 +1414,8 @@ def lambda_handler(event, context):
     print(
         f"Processing {len(instances_to_process)} instances with "
         f"concurrency={concurrency} batch_size={batch_size} for schedule '{schedule_name}' "
-        f"environmentCategory='{environment_category or 'all'}'."
+        f"environmentCategory='{environment_category or 'all'}' "
+        f"appName='{app_name or 'all'}'."
     )
 
     downsize_type = get_downsize_type() if action == "scaledown" else None
@@ -1431,5 +1466,6 @@ def lambda_handler(event, context):
         "action": action,
         "schedule": schedule_name,
         "environment_category": environment_category or "all",
+        "app_name": app_name or "all",
         "skipped_instances": skipped_due_to_schedule,
     }

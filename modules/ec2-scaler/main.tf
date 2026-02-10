@@ -119,6 +119,11 @@ resource "aws_ssm_document" "on_demand_scaling" {
         default     = "all"
         description = "Optional environmentCategory tag filter. all = no filtering; any other value filters to matching environmentCategory tag."
       }
+      AppName = {
+        type        = "String"
+        default     = "all"
+        description = "Optional appName tag filter. all = no filtering; any other value filters to matching appName tag."
+      }
     }
     mainSteps = [
       {
@@ -133,6 +138,7 @@ resource "aws_ssm_document" "on_demand_scaling" {
             action              = "{{Action}}"
             schedule            = "{{Schedule}}"
             environmentCategory = "{{EnvironmentCategory}}"
+            appName             = "{{AppName}}"
           }
         }
         outputs = [
@@ -159,6 +165,11 @@ resource "aws_ssm_document" "on_demand_scaling" {
           {
             Name     = "EnvironmentCategory"
             Selector = "$.Payload.environment_category"
+            Type     = "String"
+          },
+          {
+            Name     = "AppName"
+            Selector = "$.Payload.app_name"
             Type     = "String"
           },
           {
@@ -212,28 +223,28 @@ resource "aws_cloudwatch_event_rule" "default_down" {
   name                = "EC2ScalerScheduleDown"
   description         = "Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday"
   schedule_expression = var.lambda_schedule_down_time
-  is_enabled          = true
+  state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "default_up" {
   name                = "EC2ScalerScheduleUp"
   description         = "Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday"
   schedule_expression = var.lambda_schedule_up_time
-  is_enabled          = true
+  state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "business_down" {
   name                = "EC2ScalerBusinessHoursScheduleDown"
   description         = "Triggers Lambda to scale down EC2 instances at 6 PM Pacific, Monday through Friday"
   schedule_expression = var.business_hours_schedule_down_time
-  is_enabled          = true
+  state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "business_up" {
   name                = "EC2ScalerBusinessHoursScheduleUp"
   description         = "Triggers Lambda to scale up EC2 instances at 9 AM Pacific, Monday through Friday"
   schedule_expression = var.business_hours_schedule_up_time
-  is_enabled          = true
+  state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_target" "default_down" {

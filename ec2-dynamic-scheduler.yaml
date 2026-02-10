@@ -194,6 +194,13 @@ Resources:
               Optional environmentCategory tag filter.
               all = No environmentCategory filtering.
               Any other value filters to instances with matching environmentCategory tag (case-insensitive).
+          AppName:
+            type: String
+            default: all
+            description: |
+              Optional appName tag filter.
+              all = No appName filtering.
+              Any other value filters to instances with matching appName tag (case-insensitive).
         mainSteps:
           - name: InvokeLambda
             action: aws:invokeLambdaFunction
@@ -206,6 +213,7 @@ Resources:
                 action: '{{Action}}'
                 schedule: '{{Schedule}}'
                 environmentCategory: '{{EnvironmentCategory}}'
+                appName: '{{AppName}}'
             outputs:
               - Name: ProcessedInstances
                 Selector: $.Payload.processed_instances
@@ -221,6 +229,9 @@ Resources:
                 Type: String
               - Name: EnvironmentCategory
                 Selector: $.Payload.environment_category
+                Type: String
+              - Name: AppName
+                Selector: $.Payload.app_name
                 Type: String
               - Name: StatusCode
                 Selector: $.StatusCode
@@ -408,6 +419,16 @@ Resources:
                   return ""
               return normalized
 
+          def normalize_app_name(value):
+              if value is None:
+                  return ""
+              normalized = str(value).strip()
+              if not normalized:
+                  return ""
+              if normalized.lower() == "all":
+                  return ""
+              return normalized
+
           def parse_schedule_tag_value(raw_value):
               if not raw_value:
                   return []
@@ -444,6 +465,16 @@ Resources:
                   str(instance_environment_category).strip().lower()
                   == environment_category.lower()
               )
+
+          def instance_matches_app_name(tags, app_name):
+              if not app_name:
+                  return True
+
+              instance_app_name = get_tag_value(tags, "appName")
+              if instance_app_name is None:
+                  return False
+
+              return str(instance_app_name).strip().lower() == app_name.lower()
 
           def get_concurrency_limit():
               raw_value = os.environ.get("MAX_CONCURRENT_OPERATIONS")
@@ -1525,6 +1556,9 @@ Resources:
               environment_category = normalize_environment_category(
                   event.get("environmentCategory")
               )
+              app_name = normalize_app_name(
+                  event.get("appName") or event.get("app_name")
+              )
 
               if action not in VALID_ACTIONS:
                   raise ValueError(f"Invalid or missing 'action'. Must be one of: {VALID_ACTIONS}")
@@ -1538,7 +1572,8 @@ Resources:
 
               print(
                   f"Starting EC2 {action} process for schedule '{schedule_name}'"
-                  f" environmentCategory='{environment_category or 'all'}'..."
+                  f" environmentCategory='{environment_category or 'all'}'"
+                  f" appName='{app_name or 'all'}'..."
               )
 
               ec2_client = get_ec2_client()
@@ -1562,6 +1597,7 @@ Resources:
                       "action": action,
                       "schedule": schedule_name,
                       "environment_category": environment_category or "all",
+                      "app_name": app_name or "all",
                       "skipped_instances": 0,
                       "error": "describe_instances_failed",
                   }
@@ -1576,6 +1612,7 @@ Resources:
                       "action": action,
                       "schedule": schedule_name,
                       "environment_category": environment_category or "all",
+                      "app_name": app_name or "all",
                       "skipped_instances": 0,
                   }
 
@@ -1611,6 +1648,13 @@ Resources:
                           )
                           continue
 
+                      if not instance_matches_app_name(tags, app_name):
+                          skipped_due_to_schedule += 1
+                          print(
+                              f"Skipping {instance_id} because appName tag did not match '{app_name}'."
+                          )
+                          continue
+
                       instances_to_process.append(
                           {
                               "instance": instance,
@@ -1623,13 +1667,14 @@ Resources:
 
               if not instances_to_process:
                   print(
-                      "No EC2 instances matched the requested schedule/environmentCategory filter. Skipping workflow."
+                      "No EC2 instances matched the requested schedule/environmentCategory/appName filter. Skipping workflow."
                   )
                   return {
                       "processed_instances": 0,
                       "action": action,
                       "schedule": schedule_name,
                       "environment_category": environment_category or "all",
+                      "app_name": app_name or "all",
                       "skipped_instances": skipped_due_to_schedule,
                   }
 
@@ -1688,6 +1733,7 @@ Resources:
                   "action": action,
                   "schedule": schedule_name,
                   "environment_category": environment_category or "all",
+                  "app_name": app_name or "all",
                   "skipped_instances": skipped_due_to_schedule,
               }
 
