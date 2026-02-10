@@ -1,7 +1,11 @@
 terraform {
   required_version = ">= 1.5.0"
 
-  backend "s3" {}
+  backend "s3" {
+    bucket  = "rei-tf-state-infrastudent"
+    region  = "us-west-2"
+    encrypt = true
+  }
 
   required_providers {
     aws = {

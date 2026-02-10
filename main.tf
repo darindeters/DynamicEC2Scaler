@@ -1,4 +1,10 @@
-provider "aws" {}
+provider "aws" {
+  region = "us-west-2"
+
+  assume_role {
+    role_arn = var.role_arn
+  }
+}
 
 module "ec2_scaler" {
   source = "./modules/ec2-scaler"
