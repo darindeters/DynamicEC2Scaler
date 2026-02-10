@@ -103,3 +103,15 @@ variable "savings_log_bucket" {
   type        = string
   default     = ""
 }
+
+variable "app_name" {
+  description = "Optional application name used by Terraform locals/tagging conventions"
+  type        = string
+  default     = ""
+}
+
+variable "environment" {
+  description = "Optional environment name used by Terraform locals/tagging conventions"
+  type        = string
+  default     = ""
+}
