@@ -233,7 +233,7 @@ Resources:
               - Name: AppName
                 Selector: $.Payload.app_name
                 Type: String
-              - Name: StatusCode
+              - Name: LambdaStatusCode
                 Selector: $.StatusCode
                 Type: Integer
 
