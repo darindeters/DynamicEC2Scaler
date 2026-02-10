@@ -138,6 +138,17 @@ def normalize_schedule_name(value):
         return DEFAULT_SCHEDULE_NAME
     return normalized
 
+
+def normalize_environment_category(value):
+    if value is None:
+        return ""
+    normalized = str(value).strip()
+    if not normalized:
+        return ""
+    if normalized.lower() == "all":
+        return ""
+    return normalized
+
 def parse_schedule_tag_value(raw_value):
     if not raw_value:
         return []
@@ -161,6 +172,20 @@ def instance_matches_schedule(tags, schedule_name):
     if SCHEDULE_ALL_TOKEN in values:
         return True
     return schedule_name in values
+
+
+def instance_matches_environment_category(tags, environment_category):
+    if not environment_category:
+        return True
+
+    instance_environment_category = get_tag_value(tags, "environmentCategory")
+    if instance_environment_category is None:
+        return False
+
+    return (
+        str(instance_environment_category).strip().lower()
+        == environment_category.lower()
+    )
 
 def get_concurrency_limit():
     raw_value = os.environ.get("MAX_CONCURRENT_OPERATIONS")
@@ -1239,6 +1264,9 @@ def lambda_handler(event, context):
     action = event.get("action")
     source = event.get("source", "manual")
     schedule_name = normalize_schedule_name(event.get("schedule"))
+    environment_category = normalize_environment_category(
+        event.get("environmentCategory")
+    )
 
     if action not in VALID_ACTIONS:
         raise ValueError(f"Invalid or missing 'action'. Must be one of: {VALID_ACTIONS}")
@@ -1251,7 +1279,8 @@ def lambda_handler(event, context):
     run_start_timestamp = format_utc(run_start_time)
 
     print(
-        f"Starting EC2 {action} process for schedule '{schedule_name}'..."
+        f"Starting EC2 {action} process for schedule '{schedule_name}'"
+        f" environmentCategory='{environment_category or 'all'}'..."
     )
 
     ec2_client = get_ec2_client()
@@ -1274,6 +1303,7 @@ def lambda_handler(event, context):
             "processed_instances": 0,
             "action": action,
             "schedule": schedule_name,
+            "environment_category": environment_category or "all",
             "skipped_instances": 0,
             "error": "describe_instances_failed",
         }
@@ -1287,6 +1317,7 @@ def lambda_handler(event, context):
             "processed_instances": 0,
             "action": action,
             "schedule": schedule_name,
+            "environment_category": environment_category or "all",
             "skipped_instances": 0,
         }
 
@@ -1315,6 +1346,13 @@ def lambda_handler(event, context):
                 )
                 continue
 
+            if not instance_matches_environment_category(tags, environment_category):
+                skipped_due_to_schedule += 1
+                print(
+                    f"Skipping {instance_id} because environmentCategory tag did not match '{environment_category}'."
+                )
+                continue
+
             instances_to_process.append(
                 {
                     "instance": instance,
@@ -1327,12 +1365,13 @@ def lambda_handler(event, context):
 
     if not instances_to_process:
         print(
-            "No EC2 instances matched the requested schedule. Skipping workflow."
+            "No EC2 instances matched the requested schedule/environmentCategory filter. Skipping workflow."
         )
         return {
             "processed_instances": 0,
             "action": action,
             "schedule": schedule_name,
+            "environment_category": environment_category or "all",
             "skipped_instances": skipped_due_to_schedule,
         }
 
@@ -1340,7 +1379,8 @@ def lambda_handler(event, context):
     concurrency = get_concurrency_limit()
     print(
         f"Processing {len(instances_to_process)} instances with "
-        f"concurrency={concurrency} batch_size={batch_size} for schedule '{schedule_name}'."
+        f"concurrency={concurrency} batch_size={batch_size} for schedule '{schedule_name}' "
+        f"environmentCategory='{environment_category or 'all'}'."
     )
 
     downsize_type = get_downsize_type() if action == "scaledown" else None
@@ -1390,6 +1430,6 @@ def lambda_handler(event, context):
         "processed_instances": processed_count,
         "action": action,
         "schedule": schedule_name,
+        "environment_category": environment_category or "all",
         "skipped_instances": skipped_due_to_schedule,
     }
-

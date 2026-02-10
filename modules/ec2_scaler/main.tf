@@ -77,6 +77,101 @@ resource "aws_iam_role_policy" "lambda" {
   })
 }
 
+
+resource "aws_ssm_document" "on_demand_scaling" {
+  name            = "${var.lambda_function_name}-OnDemandScaling"
+  document_type   = "Automation"
+  document_format = "YAML"
+
+  content = yamlencode({
+    schemaVersion = "0.3"
+    description = <<-EOT
+      ## EC2 ON-DEMAND SCALING AUTOMATION
+
+      Manually trigger scale up or scale down actions for EC2 instances opted into the DynamicEC2Scheduler.
+
+      ### REQUIRED EC2 INSTANCE TAG
+
+      **DynamicInstanceScaling** = `true`
+
+      * PreferredInstanceType tag is automatically added when an instance is first scaled down.
+
+      ### BEHAVIOR
+
+      * **Scale Down:** Resizes instances to t3.medium
+      * **Scale Up:** Restores instances to their PreferredInstanceType
+    EOT
+    parameters = {
+      Action = {
+        type          = "String"
+        allowedValues = ["scaleup", "scaledown"]
+        default       = "scaleup"
+        description   = "scaleup = Restore to PreferredInstanceType\nscaledown = Resize to t3.medium"
+      }
+      Schedule = {
+        type          = "String"
+        allowedValues = ["default", "business-hours", "all"]
+        default       = "default"
+        description   = "default = Instances tagged with default schedule\nbusiness-hours = Instances tagged with business-hours schedule\nall = All opted-in instances"
+      }
+      EnvironmentCategory = {
+        type        = "String"
+        default     = "all"
+        description = "Optional environmentCategory tag filter. all = no filtering; any other value filters to matching environmentCategory tag."
+      }
+    }
+    mainSteps = [
+      {
+        name           = "InvokeLambda"
+        action         = "aws:invokeLambdaFunction"
+        timeoutSeconds = 900
+        onFailure      = "Abort"
+        inputs = {
+          FunctionName = aws_lambda_function.ec2_scaler.function_name
+          InputPayload = {
+            source              = "Scheduled"
+            action              = "{{Action}}"
+            schedule            = "{{Schedule}}"
+            environmentCategory = "{{EnvironmentCategory}}"
+          }
+        }
+        outputs = [
+          {
+            Name     = "ProcessedInstances"
+            Selector = "$.Payload.processed_instances"
+            Type     = "Integer"
+          },
+          {
+            Name     = "SkippedInstances"
+            Selector = "$.Payload.skipped_instances"
+            Type     = "Integer"
+          },
+          {
+            Name     = "Action"
+            Selector = "$.Payload.action"
+            Type     = "String"
+          },
+          {
+            Name     = "Schedule"
+            Selector = "$.Payload.schedule"
+            Type     = "String"
+          },
+          {
+            Name     = "EnvironmentCategory"
+            Selector = "$.Payload.environment_category"
+            Type     = "String"
+          },
+          {
+            Name     = "StatusCode"
+            Selector = "$.StatusCode"
+            Type     = "Integer"
+          }
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_lambda_function" "ec2_scaler" {
   function_name = var.lambda_function_name
   description   = "Scales EC2 instances up or down based on schedule and tags"

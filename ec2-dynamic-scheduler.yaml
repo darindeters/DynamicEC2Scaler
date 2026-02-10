@@ -47,6 +47,10 @@ Parameters:
     Type: String
     Default: DynamicScalingSchedule
     Description: Tag key used to assign instances to alternative scaling schedules.
+  AutomationDocumentName:
+    Type: String
+    Default: DynamicEC2OnDemandScaling
+    Description: Name of the SSM Automation document used for ad-hoc scale up/down invocations.
   ConcurrentInstanceOperations:
     Type: Number
     Default: 4
@@ -138,6 +142,89 @@ Resources:
                 Action:
                   - ce:GetSavingsPlansCoverage
                 Resource: "*"
+
+  EC2OnDemandScalingDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Ref AutomationDocumentName
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Content:
+        schemaVersion: '0.3'
+        description: |
+          ## EC2 ON-DEMAND SCALING AUTOMATION
+
+          Manually trigger scale up or scale down actions for EC2 instances opted into the DynamicEC2Scheduler.
+
+          ### REQUIRED EC2 INSTANCE TAG
+
+          **DynamicInstanceScaling** = `true`
+
+          * PreferredInstanceType tag is automatically added when an instance is first scaled down.
+
+          ### BEHAVIOR
+
+          * **Scale Down:** Resizes instances to t3.medium
+          * **Scale Up:** Restores instances to their PreferredInstanceType
+        parameters:
+          Action:
+            type: String
+            allowedValues:
+              - scaleup
+              - scaledown
+            default: scaleup
+            description: |
+              scaleup = Restore to PreferredInstanceType
+              scaledown = Resize to t3.medium
+          Schedule:
+            type: String
+            allowedValues:
+              - default
+              - business-hours
+              - all
+            default: default
+            description: |
+              default = Instances tagged with default schedule
+              business-hours = Instances tagged with business-hours schedule
+              all = All opted-in instances
+          EnvironmentCategory:
+            type: String
+            default: all
+            description: |
+              Optional environmentCategory tag filter.
+              all = No environmentCategory filtering.
+              Any other value filters to instances with matching environmentCategory tag (case-insensitive).
+        mainSteps:
+          - name: InvokeLambda
+            action: aws:invokeLambdaFunction
+            timeoutSeconds: 900
+            onFailure: Abort
+            inputs:
+              FunctionName: !Ref LambdaFunctionName
+              InputPayload:
+                source: Scheduled
+                action: '{{Action}}'
+                schedule: '{{Schedule}}'
+                environmentCategory: '{{EnvironmentCategory}}'
+            outputs:
+              - Name: ProcessedInstances
+                Selector: $.Payload.processed_instances
+                Type: Integer
+              - Name: SkippedInstances
+                Selector: $.Payload.skipped_instances
+                Type: Integer
+              - Name: Action
+                Selector: $.Payload.action
+                Type: String
+              - Name: Schedule
+                Selector: $.Payload.schedule
+                Type: String
+              - Name: EnvironmentCategory
+                Selector: $.Payload.environment_category
+                Type: String
+              - Name: StatusCode
+                Selector: $.StatusCode
+                Type: Integer
 
   EC2ScalerFunction:
     Type: AWS::Lambda::Function
@@ -311,6 +398,16 @@ Resources:
                   return DEFAULT_SCHEDULE_NAME
               return normalized
 
+          def normalize_environment_category(value):
+              if value is None:
+                  return ""
+              normalized = str(value).strip()
+              if not normalized:
+                  return ""
+              if normalized.lower() == "all":
+                  return ""
+              return normalized
+
           def parse_schedule_tag_value(raw_value):
               if not raw_value:
                   return []
@@ -334,6 +431,19 @@ Resources:
               if SCHEDULE_ALL_TOKEN in values:
                   return True
               return schedule_name in values
+
+          def instance_matches_environment_category(tags, environment_category):
+              if not environment_category:
+                  return True
+
+              instance_environment_category = get_tag_value(tags, "environmentCategory")
+              if instance_environment_category is None:
+                  return False
+
+              return (
+                  str(instance_environment_category).strip().lower()
+                  == environment_category.lower()
+              )
 
           def get_concurrency_limit():
               raw_value = os.environ.get("MAX_CONCURRENT_OPERATIONS")
@@ -1412,6 +1522,9 @@ Resources:
               action = event.get("action")
               source = event.get("source", "manual")
               schedule_name = normalize_schedule_name(event.get("schedule"))
+              environment_category = normalize_environment_category(
+                  event.get("environmentCategory")
+              )
 
               if action not in VALID_ACTIONS:
                   raise ValueError(f"Invalid or missing 'action'. Must be one of: {VALID_ACTIONS}")
@@ -1424,7 +1537,8 @@ Resources:
               run_start_timestamp = format_utc(run_start_time)
 
               print(
-                  f"Starting EC2 {action} process for schedule '{schedule_name}'..."
+                  f"Starting EC2 {action} process for schedule '{schedule_name}'"
+                  f" environmentCategory='{environment_category or 'all'}'..."
               )
 
               ec2_client = get_ec2_client()
@@ -1447,6 +1561,7 @@ Resources:
                       "processed_instances": 0,
                       "action": action,
                       "schedule": schedule_name,
+                      "environment_category": environment_category or "all",
                       "skipped_instances": 0,
                       "error": "describe_instances_failed",
                   }
@@ -1460,6 +1575,7 @@ Resources:
                       "processed_instances": 0,
                       "action": action,
                       "schedule": schedule_name,
+                      "environment_category": environment_category or "all",
                       "skipped_instances": 0,
                   }
 
@@ -1488,6 +1604,13 @@ Resources:
                           )
                           continue
 
+                      if not instance_matches_environment_category(tags, environment_category):
+                          skipped_due_to_schedule += 1
+                          print(
+                              f"Skipping {instance_id} because environmentCategory tag did not match '{environment_category}'."
+                          )
+                          continue
+
                       instances_to_process.append(
                           {
                               "instance": instance,
@@ -1500,12 +1623,13 @@ Resources:
 
               if not instances_to_process:
                   print(
-                      "No EC2 instances matched the requested schedule. Skipping workflow."
+                      "No EC2 instances matched the requested schedule/environmentCategory filter. Skipping workflow."
                   )
                   return {
                       "processed_instances": 0,
                       "action": action,
                       "schedule": schedule_name,
+                      "environment_category": environment_category or "all",
                       "skipped_instances": skipped_due_to_schedule,
                   }
 
@@ -1563,6 +1687,7 @@ Resources:
                   "processed_instances": processed_count,
                   "action": action,
                   "schedule": schedule_name,
+                  "environment_category": environment_category or "all",
                   "skipped_instances": skipped_due_to_schedule,
               }
 
