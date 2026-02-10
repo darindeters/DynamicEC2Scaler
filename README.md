@@ -69,6 +69,11 @@ You can deploy this stack using the AWS Console, AWS CLI, or SAM/CDK.
    Override any of the stack parameters via `-var` flags (for example, `-var "lambda_schedule_up_time=cron(0 17 ? * MON-FRI *)"`).
 3. Apply the required tags to your EC2 instances (see below) after the deployment completes.
 
+
+To avoid naming collisions across parallel deployments (or across separate Terraform states), set `deployment_id` to a stable unique value per deployment. If omitted, Terraform generates one and keeps it in state so subsequent applies reuse the same names.
+
+If your execution role cannot create IAM roles, set `existing_lambda_role_arn` to an already-provisioned Lambda execution role and Terraform will reuse it instead of creating `aws_iam_role` resources.
+
 To deploy with AWS Console:
 
 1. Download the CloudFormation template: [`ec2-dynamic-scheduler.yaml`](./ec2-dynamic-scheduler.yaml)
@@ -86,6 +91,8 @@ To deploy with AWS Console:
 - **Savings Plan Discount:** Choose whether to provide a manual discount percentage (`SavingsPlanDiscountPercent`) or let the stack derive an effective rate from recent Cost Explorer coverage data by setting `SavingsPlanDiscountMode` to `Coverage`. Coverage mode uses the `ce:GetSavingsPlansCoverage` API (ensure Cost Explorer is enabled) and averages the last `SavingsPlanCoverageLookbackDays` (30 by default).
 - **CloudWatch Metrics:** Use the `SavingsMetricNamespace` parameter to control where hourly savings metrics are published. These metrics expose the total run savings and per-instance estimates, enabling dashboards, anomaly detection, or cost alerts alongside the S3 JSON reports. Set the parameter to an empty string if you prefer to disable metric publication.
 - **Pricing Detection:** The Lambda maps each instance's platform to the appropriate AWS Pricing filters before calculating savings. If an instance platform can't be detected, override the fallback filters with the `DefaultPricingOperatingSystem`, `DefaultPricingLicenseModel`, and `DefaultPricingPreInstalledSoftware` parameters instead of editing the function code.
+- **Deployment Identity:** Use `deployment_id` to control the unique suffix used for global-name resources (S3 bucket, IAM role/policy names, EventBridge rule names, log group, and Lambda name). Leaving it blank auto-generates a stable per-state suffix.
+- **Existing IAM Role Reuse:** Set `existing_lambda_role_arn` when Terraform should attach the Lambda to a pre-existing execution role instead of creating a new role/policy.
 
 ## 🧪 Testing
 

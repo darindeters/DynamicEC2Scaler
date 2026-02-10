@@ -115,3 +115,15 @@ variable "environment" {
   type        = string
   default     = ""
 }
+
+variable "deployment_id" {
+  description = "Optional identifier appended to managed resource names to avoid collisions across deployments"
+  type        = string
+  default     = ""
+}
+
+variable "existing_lambda_role_arn" {
+  description = "Optional IAM role ARN for the Lambda function. When set, Terraform will reuse this role instead of creating a new one"
+  type        = string
+  default     = ""
+}

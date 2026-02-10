@@ -82,3 +82,13 @@ variable "savings_log_bucket" {
   description = "Optional custom bucket name for storing savings and actuals logs (leave blank to auto-generate)"
   type        = string
 }
+
+variable "deployment_id" {
+  description = "Optional identifier appended to managed resource names to avoid collisions across deployments"
+  type        = string
+}
+
+variable "existing_lambda_role_arn" {
+  description = "Optional IAM role ARN for the Lambda function. When set, Terraform will reuse this role instead of creating a new one"
+  type        = string
+}
