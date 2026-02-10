@@ -1,7 +1,7 @@
 
 # EC2 Dynamic Scheduler
 
-This AWS CloudFormation stack resizes EC2 instances on a schedule to optimize compute costs for business-hours workloads. It scales instances down during off-hours and scales them back up before the next business day. This allows you to reduce spend without shutting down systems or triggering alerts from monitoring tools.
+This Terraform project deploys an AWS Lambda-based scheduler that resizes EC2 instances on a schedule to optimize compute costs for business-hours workloads. It scales instances down during off-hours and scales them back up before the next business day. This allows you to reduce spend without shutting down systems or triggering alerts from monitoring tools.
 
 ## 🔧 How It Works
 
@@ -31,6 +31,7 @@ Apply these tags to any EC2 instance you want managed by this scheduler:
 | Tag Key                  | Example Value      | Purpose                                                                 |
 |--------------------------|--------------------|-------------------------------------------------------------------------|
 | `DynamicScalingSchedule` | `default`, `business-hours`, `all`   | Assigns the instance to an alternate schedule. Comma-separated values allow an instance to opt into multiple schedules; instances without this tag use the default schedule. |
+| `environmentCategory`    | `prod`, `nonprod`  | Optional filter for manual/on-demand runs; only instances with a matching value are processed when this filter is supplied. |
 
 > For the business-hours schedule, set the schedule tag key (defaults to `DynamicScalingSchedule`) to the value `business-hours` on each instance you want on that timetable.
 
@@ -88,6 +89,19 @@ To deploy with AWS Console:
 
 ## 🧪 Testing
 
+### Recommended: SSM Automation (on-demand runs)
+
+The deployment creates an SSM Automation document named `<lambda_function_name>-OnDemandScaling` so you can run scale-up/scale-down on demand without changing schedules.
+
+Parameters:
+- `Action`: `scaleup` or `scaledown`
+- `Schedule`: `default`, `business-hours`, or `all`
+- `EnvironmentCategory`: `all` (no filter) or a specific `environmentCategory` tag value
+
+> This is the safest manual trigger path because the Lambda blocks invocations where `source` is `manual`.
+
+### Lambda console test event (supported)
+
 To test in the Lambda console:
 
 1. Open the Lambda function created by the stack
@@ -96,10 +110,12 @@ To test in the Lambda console:
 {
   "source": "Scheduled",
   "action": "scaleup",
-  "schedule": "default"
+  "schedule": "default",
+  "environmentCategory": "all"
 }
 ```
    - Replace `default` with another schedule name such as `business-hours` or `all` to target the corresponding set of tagged instances.
+   - Set `environmentCategory` to a tag value (for example, `prod`) to scope the run to matching instances.
 
 ## 🚀 Suggested Future Enhancements
 
