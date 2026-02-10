@@ -20,6 +20,8 @@ module "ec2_scaler" {
   default_pricing_license_model          = var.default_pricing_license_model
   default_pricing_preinstalled_software  = var.default_pricing_preinstalled_software
   savings_log_bucket                     = var.savings_log_bucket
+  deployment_id                          = var.deployment_id
+  existing_lambda_role_arn               = var.existing_lambda_role_arn
 }
 
 output "lambda_function_name" {

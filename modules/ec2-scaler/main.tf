@@ -6,17 +6,39 @@ data "archive_file" "lambda" {
   output_path = "${path.module}/lambda.zip"
 }
 
+
+data "aws_caller_identity" "current" {}
+
+resource "random_id" "deployment" {
+  byte_length = 4
+
+  keepers = {
+    lambda_function_name = var.lambda_function_name
+    deployment_id        = trimspace(var.deployment_id)
+  }
+}
+
+locals {
+  effective_deployment_id = trimspace(var.deployment_id) != "" ? trimspace(var.deployment_id) : random_id.deployment.hex
+  role_name               = "EC2ScalerLambdaRole-${local.effective_deployment_id}"
+  policy_name             = "EC2ScalerPolicy-${local.effective_deployment_id}"
+  generated_bucket_name   = lower("infrastudent-savings-${data.aws_caller_identity.current.account_id}-${local.effective_deployment_id}")
+  savings_bucket_name     = trimspace(var.savings_log_bucket) != "" ? trimspace(var.savings_log_bucket) : local.generated_bucket_name
+  lambda_role_arn         = trimspace(var.existing_lambda_role_arn) != "" ? trimspace(var.existing_lambda_role_arn) : aws_iam_role.lambda[0].arn
+}
+
 resource "aws_s3_bucket" "savings_log" {
-  bucket = var.savings_log_bucket != "" ? var.savings_log_bucket : null
+  bucket = local.savings_bucket_name
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
-  name              = "/aws/lambda/${var.lambda_function_name}"
+  name              = "/aws/lambda/${var.lambda_function_name}-${local.effective_deployment_id}"
   retention_in_days = 14
 }
 
 resource "aws_iam_role" "lambda" {
-  name = "EC2ScalerLambdaRole"
+  count = trimspace(var.existing_lambda_role_arn) == "" ? 1 : 0
+  name  = local.role_name
 
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
@@ -29,8 +51,9 @@ resource "aws_iam_role" "lambda" {
 }
 
 resource "aws_iam_role_policy" "lambda" {
-  name = "EC2ScalerPolicy"
-  role = aws_iam_role.lambda.id
+  count = trimspace(var.existing_lambda_role_arn) == "" ? 1 : 0
+  name  = local.policy_name
+  role  = aws_iam_role.lambda[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -79,7 +102,7 @@ resource "aws_iam_role_policy" "lambda" {
 
 
 resource "aws_ssm_document" "on_demand_scaling" {
-  name            = "${var.lambda_function_name}-OnDemandScaling"
+  name            = "${var.lambda_function_name}-${local.effective_deployment_id}-OnDemandScaling"
   document_type   = "Automation"
   document_format = "YAML"
 
@@ -184,10 +207,10 @@ resource "aws_ssm_document" "on_demand_scaling" {
 }
 
 resource "aws_lambda_function" "ec2_scaler" {
-  function_name = var.lambda_function_name
+  function_name = "${var.lambda_function_name}-${local.effective_deployment_id}"
   description   = "Scales EC2 instances up or down based on schedule and tags"
   runtime       = "python3.12"
-  role          = aws_iam_role.lambda.arn
+  role          = local.lambda_role_arn
   handler       = "index.lambda_handler"
   memory_size   = 512
   timeout       = 300
@@ -220,28 +243,28 @@ resource "aws_lambda_function" "ec2_scaler" {
 }
 
 resource "aws_cloudwatch_event_rule" "default_down" {
-  name                = "EC2ScalerScheduleDown"
+  name                = "EC2ScalerScheduleDown-${local.effective_deployment_id}"
   description         = "Triggers Lambda to scale down EC2 instances at 7 PM Pacific, Monday through Friday"
   schedule_expression = var.lambda_schedule_down_time
   state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "default_up" {
-  name                = "EC2ScalerScheduleUp"
+  name                = "EC2ScalerScheduleUp-${local.effective_deployment_id}"
   description         = "Triggers Lambda to scale up EC2 instances at 4 AM Pacific, Monday through Friday"
   schedule_expression = var.lambda_schedule_up_time
   state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "business_down" {
-  name                = "EC2ScalerBusinessHoursScheduleDown"
+  name                = "EC2ScalerBusinessHoursScheduleDown-${local.effective_deployment_id}"
   description         = "Triggers Lambda to scale down EC2 instances at 6 PM Pacific, Monday through Friday"
   schedule_expression = var.business_hours_schedule_down_time
   state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_rule" "business_up" {
-  name                = "EC2ScalerBusinessHoursScheduleUp"
+  name                = "EC2ScalerBusinessHoursScheduleUp-${local.effective_deployment_id}"
   description         = "Triggers Lambda to scale up EC2 instances at 9 AM Pacific, Monday through Friday"
   schedule_expression = var.business_hours_schedule_up_time
   state               = "ENABLED"
@@ -249,7 +272,7 @@ resource "aws_cloudwatch_event_rule" "business_up" {
 
 resource "aws_cloudwatch_event_target" "default_down" {
   rule      = aws_cloudwatch_event_rule.default_down.name
-  target_id = "DownTarget"
+  target_id = "DownTarget-${local.effective_deployment_id}"
   arn       = aws_lambda_function.ec2_scaler.arn
   input = jsonencode({
     action   = "scaledown"
@@ -260,7 +283,7 @@ resource "aws_cloudwatch_event_target" "default_down" {
 
 resource "aws_cloudwatch_event_target" "default_up" {
   rule      = aws_cloudwatch_event_rule.default_up.name
-  target_id = "UpTarget"
+  target_id = "UpTarget-${local.effective_deployment_id}"
   arn       = aws_lambda_function.ec2_scaler.arn
   input = jsonencode({
     action   = "scaleup"
@@ -271,7 +294,7 @@ resource "aws_cloudwatch_event_target" "default_up" {
 
 resource "aws_cloudwatch_event_target" "business_down" {
   rule      = aws_cloudwatch_event_rule.business_down.name
-  target_id = "BusinessHoursDownTarget"
+  target_id = "BusinessHoursDownTarget-${local.effective_deployment_id}"
   arn       = aws_lambda_function.ec2_scaler.arn
   input = jsonencode({
     action   = "scaledown"
@@ -282,7 +305,7 @@ resource "aws_cloudwatch_event_target" "business_down" {
 
 resource "aws_cloudwatch_event_target" "business_up" {
   rule      = aws_cloudwatch_event_rule.business_up.name
-  target_id = "BusinessHoursUpTarget"
+  target_id = "BusinessHoursUpTarget-${local.effective_deployment_id}"
   arn       = aws_lambda_function.ec2_scaler.arn
   input = jsonencode({
     action   = "scaleup"
@@ -292,7 +315,7 @@ resource "aws_cloudwatch_event_target" "business_up" {
 }
 
 resource "aws_lambda_permission" "default_down" {
-  statement_id  = "AllowExecutionFromEventBridgeDown"
+  statement_id  = "AllowExecutionFromEventBridgeDown-${local.effective_deployment_id}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ec2_scaler.function_name
   principal     = "events.amazonaws.com"
@@ -300,7 +323,7 @@ resource "aws_lambda_permission" "default_down" {
 }
 
 resource "aws_lambda_permission" "default_up" {
-  statement_id  = "AllowExecutionFromEventBridgeUp"
+  statement_id  = "AllowExecutionFromEventBridgeUp-${local.effective_deployment_id}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ec2_scaler.function_name
   principal     = "events.amazonaws.com"
@@ -308,7 +331,7 @@ resource "aws_lambda_permission" "default_up" {
 }
 
 resource "aws_lambda_permission" "business_down" {
-  statement_id  = "AllowExecutionFromBusinessHoursDown"
+  statement_id  = "AllowExecutionFromBusinessHoursDown-${local.effective_deployment_id}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ec2_scaler.function_name
   principal     = "events.amazonaws.com"
@@ -316,7 +339,7 @@ resource "aws_lambda_permission" "business_down" {
 }
 
 resource "aws_lambda_permission" "business_up" {
-  statement_id  = "AllowExecutionFromBusinessHoursUp"
+  statement_id  = "AllowExecutionFromBusinessHoursUp-${local.effective_deployment_id}"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ec2_scaler.function_name
   principal     = "events.amazonaws.com"
