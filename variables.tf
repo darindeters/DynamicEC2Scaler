@@ -127,3 +127,8 @@ variable "existing_lambda_role_arn" {
   type        = string
   default     = ""
 }
+
+variable "role_arn" {
+  description = "IAM role ARN for Terraform to assume when managing AWS resources"
+  type        = string
+}
