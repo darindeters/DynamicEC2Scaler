@@ -196,7 +196,7 @@ resource "aws_ssm_document" "on_demand_scaling" {
             Type     = "String"
           },
           {
-            Name     = "StatusCode"
+            Name     = "LambdaStatusCode"
             Selector = "$.StatusCode"
             Type     = "Integer"
           }
