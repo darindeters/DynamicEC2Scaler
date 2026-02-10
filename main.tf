@@ -16,7 +16,7 @@ terraform {
 provider "aws" {}
 
 module "ec2_scaler" {
-  source = "./modules/ec2_scaler"
+  source = "./modules/ec2-scaler"
 
   lambda_function_name                   = var.lambda_function_name
   lambda_schedule_up_time                = var.lambda_schedule_up_time
